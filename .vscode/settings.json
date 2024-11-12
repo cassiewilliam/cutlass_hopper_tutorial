@@ -1,0 +1,13 @@
+{
+    "files.associations": {
+        "*.cu": "cpp",
+        "*.cuh": "hpp",
+        "*.tcc": "cpp",
+        "deque": "cpp",
+        "list": "cpp",
+        "string": "cpp",
+        "vector": "cpp",
+        "functional": "cpp",
+        "random": "cpp"
+    }
+}
