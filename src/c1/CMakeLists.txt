@@ -35,3 +35,7 @@ else()
 endif()
 target_include_directories(c1_test_gemm_kernel_swizzle PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
 target_link_libraries(c1_test_gemm_kernel_swizzle PRIVATE nvidia::cutlass::cutlass)
+
+add_executable(c1_test_query_block_mapped_sm_id query_block_mapped_sm_id.cu)
+target_include_directories(c1_test_query_block_mapped_sm_id PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
+target_link_libraries(c1_test_query_block_mapped_sm_id PRIVATE nvidia::cutlass::cutlass)
