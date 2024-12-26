@@ -154,7 +154,7 @@ __global__ void test_dequantize(uint32_t* input, uint4* output, int n, bool opt 
 
 int main(int argc, char const** argv)
 {
-    constexpr int num_elems = 1024 * 1024; // 4 * 1M elements
+    constexpr int num_elems = 1024 * 1024 * 128; // 4 * 128M elements
     uint32_t* h_data = (uint32_t*)malloc(num_elems * sizeof(int));
     uint32_t* d_data;
     uint4* cvt_result;
