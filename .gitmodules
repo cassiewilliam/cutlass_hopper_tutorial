@@ -1,3 +1,9 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+[submodule "3rdparty/flux"]
+	path = 3rdparty/flux
+	url = https://github.com/bytedance/flux.git
+[submodule "3rdparty/flash-attention"]
+	path = 3rdparty/flash-attention
+	url = https://github.com/Dao-AILab/flash-attention.git
