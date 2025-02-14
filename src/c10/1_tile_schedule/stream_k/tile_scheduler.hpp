@@ -232,6 +232,7 @@ public:
 
     Params const params;
 
+    // NOTE: 用于将某些抽象或封装的数据结构转换回底层的具体参数
     static Params
     to_underlying_arguments(Arguments const& args) {
         int device;

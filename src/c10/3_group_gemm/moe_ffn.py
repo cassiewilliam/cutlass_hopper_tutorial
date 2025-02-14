@@ -40,7 +40,7 @@ class SwitchMoE(nn.Module):
 
         x = x.reshape(batch_size * seq_len, hidden_dim)
 
-        # input: [b * s, h] ==> output: [b * s, num_experts]
+        # input: [b * s, h] * weight: [h, num_experts] ==> output: [b * s, num_experts]
         gate_out = self.gate(x)
 
         print(gate_out.shape, gate_out)
