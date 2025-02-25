@@ -188,8 +188,8 @@ int tma_load_and_store(int M, int N, int iterations = 1)
     for (size_t i = 0; i < host_S.size(); ++i)
         host_S[i] = static_cast<Element>(float(i));
 
-    thrust::host_vector<Element> device_S = host_S;
-    thrust::host_vector<Element> device_D = host_D;
+    thrust::device_vector<Element> device_S = host_S;
+    thrust::device_vector<Element> device_D = host_D;
 
     // make tensors
     auto gmem_layout_S = make_layout(tensor_shape, LayoutRight{});
