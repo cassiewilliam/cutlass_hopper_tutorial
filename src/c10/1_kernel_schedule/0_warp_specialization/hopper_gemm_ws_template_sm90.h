@@ -27,7 +27,7 @@
 #include "mainloop_sm90_tma_ws.hpp"
 #include "epilogue_sm90_tma_ws.hpp"
 
-namespace c1000
+namespace c1010
 {
 
 template <typename T>

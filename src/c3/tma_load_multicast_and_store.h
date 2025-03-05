@@ -89,7 +89,7 @@ template <int   kNumThreads,
           class Element,
           class Params>
 __global__ static void __launch_bounds__(kNumThreads, 1)
-tma_load_store_kernel(CUTE_GRID_CONSTANT Params const params)
+tma_load_multicast_and_store_kernel(CUTE_GRID_CONSTANT Params const params)
 {
     using namespace cute;
 
@@ -168,22 +168,25 @@ tma_load_store_kernel(CUTE_GRID_CONSTANT Params const params)
     }
 }
 
-template <int TileShape_M = 128,
-          int TileShape_N = 128,
-          int Threads = 32>
-int tma_load_and_store(int M, int N, int iterations = 1)
+template <bool MultiCast   = true,
+          int  Copy_N      = 2,
+          int  TileShape_M = 128,
+          int  TileShape_N = 128,
+          int  Threads     = 128>
+int tma_load_multicast_and_store(int M, int N, int iterations = 1)
 {
     using namespace cute;
 
-    printf("copy with TMA load and store -- no swizzling. \n");
+    printf("copy with TMA multicast load and store -- no swizzling. \n");
 
     using Element = float;
     
     auto tensor_shape = make_shape(M, N);
+    auto tenosr_shape_out = make_shape(M, N, Int<Copy_N>{});
 
     // allocate and initialize
     thrust::host_vector<Element> host_S(size(tensor_shape)); // (M, N)
-    thrust::host_vector<Element> host_D(size(tensor_shape)); // (M, N)
+    thrust::host_vector<Element> host_D(size(tenosr_shape_out)); // (M, N, Copy_N)
 
     for (size_t i = 0; i < host_S.size(); ++i)
         host_S[i] = static_cast<Element>(float(i));
@@ -193,7 +196,7 @@ int tma_load_and_store(int M, int N, int iterations = 1)
 
     // make tensors
     auto gmem_layout_S = make_layout(tensor_shape, LayoutRight{});
-    auto gmem_layout_D = make_layout(tensor_shape, LayoutRight{});
+    auto gmem_layout_D = make_layout(tensor_shape_output, LayoutRight{});
 
     Tensor tensor_S = make_tensor(make_gmem_ptr(thrust::raw_pointer_cast(device_S.data())), gmem_layout_S);
     Tensor tensor_D = make_tensor(make_gmem_ptr(thrust::raw_pointer_cast(device_D.data())), gmem_layout_D);
@@ -215,7 +218,7 @@ int tma_load_and_store(int M, int N, int iterations = 1)
     int smem_size = int(sizeof(SharedStorageTMA<Element, decltype(smem_layout)>));
     printf("smem size: %d. \n", smem_size);
 
-    void const* kernel = (void const *)tma_load_store_kernel<Threads, Element, decltype(params)>;
+    void const* kernel = (void const *)tma_load_multicast_and_store_kernel<Threads, Element, decltype(params)>;
     set_smem_size(smem_size, kernel);
 
     // Define the cluster launch paramter structure

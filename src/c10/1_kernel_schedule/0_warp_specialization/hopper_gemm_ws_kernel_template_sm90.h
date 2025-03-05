@@ -20,7 +20,7 @@
 #include <cutlass/epilogue/collective/collective_builder.hpp>
 #include <cutlass/gemm/device/gemm_universal_adapter.h>
 
-namespace c1000
+namespace c1010
 {
 
 struct HopperFP8GEMM

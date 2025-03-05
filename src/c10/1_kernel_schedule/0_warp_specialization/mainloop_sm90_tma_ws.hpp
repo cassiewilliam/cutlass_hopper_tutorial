@@ -11,7 +11,7 @@
 
 #include <cutlass/gemm/collective/collective_builder.hpp>
 
-namespace c1000
+namespace c1010
 {
 
 template<typename KernelTraits>

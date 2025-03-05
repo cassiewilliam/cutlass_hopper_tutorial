@@ -9,7 +9,7 @@
 #include <cutlass/numeric_types.h>
 #include <cutlass/pipeline/pipeline.hpp>
 
-namespace c1000
+namespace c1010
 {
 
 // writeout RMEM -> GMEM

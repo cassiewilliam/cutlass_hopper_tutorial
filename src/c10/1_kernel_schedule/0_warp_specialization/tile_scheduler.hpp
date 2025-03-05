@@ -17,7 +17,7 @@
 #include <cutlass/fast_math.h>
 #include <cutlass/gemm_coord.h>
 
-namespace c1000
+namespace c1010
 {
 
 class SingleTileScheduler

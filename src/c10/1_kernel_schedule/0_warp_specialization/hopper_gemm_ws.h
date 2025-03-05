@@ -3,7 +3,7 @@
 #include <vector>
 #include <cuda_runtime_api.h>
 
-namespace c1000
+namespace c1010
 {
 /**
  * @brief 用于hopper_gemm_ws运行支持的接口
