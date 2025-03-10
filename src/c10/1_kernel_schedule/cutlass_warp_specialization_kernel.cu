@@ -1,5 +1,3 @@
-#pragma once
-
 #include <cuda_runtime.h>
 #include <iostream>
 
@@ -24,6 +22,8 @@
 #include <cutlass/util/reference/device/gemm.h>
 #include <cutlass/util/reference/device/tensor_compare.h>
 #include <cutlass/util/reference/device/tensor_fill.h>
+
+using namespace cute;
 
 namespace c101
 {
@@ -219,17 +219,17 @@ struct KernelTraits
     // A matrix configuration
     using         ElementA    = float;                                          // Element type for A matrix operand
     using         LayoutA     = cutlass::layout::RowMajor;                      // Layout type for A matrix operand
-    constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementA>::value;    // Memory access granularity/alignment of A matrix in units of elements (up to 16 bytes)
+    static constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementA>::value;    // Memory access granularity/alignment of A matrix in units of elements (up to 16 bytes)
 
     // B matrix configuration
     using         ElementB    = float;                                          // Element type for B matrix operand
     using         LayoutB     = cutlass::layout::ColumnMajor;                   // Layout type for B matrix operand
-    constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // Memory access granularity/alignment of B matrix in units of elements (up to 16 bytes)
+    static constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // Memory access granularity/alignment of B matrix in units of elements (up to 16 bytes)
 
     // C/D matrix configuration
     using         ElementC    = float;                                          // Element type for C and D matrix operands
     using         LayoutC     = cutlass::layout::ColumnMajor;                   // Layout type for C and D matrix operands
-    constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // Memory access granularity/alignment of C matrix in units of elements (up to 16 bytes)
+    static constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // Memory access granularity/alignment of C matrix in units of elements (up to 16 bytes)
 
     // Core kernel configurations
     using ElementAccumulator  = float;                                          // Element type for internal accumulation
@@ -284,79 +284,7 @@ struct KernelTraits
     using StrideB = typename Gemm::GemmKernel::StrideB;
     using StrideC = typename Gemm::GemmKernel::StrideC;
     using StrideD = typename Gemm::GemmKernel::StrideD;
-}
-
-/// Execute a given example GEMM computation
-template <typename Gemm>
-int run(Options &options)
-{
-  initialize(options);
-
-  // Instantiate CUTLASS kernel depending on templates
-  Gemm gemm;
-
-  // Create a structure of gemm kernel arguments suitable for invoking an instance of Gemm
-  auto arguments = args_from_options(options);
-
-  // Using the arguments, query for extra workspace required for matrix multiplication computation
-  size_t workspace_size = Gemm::get_workspace_size(arguments);
-
-  // Allocate workspace memory
-  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-
-  // Check if the problem size is supported or not
-  CUTLASS_CHECK(gemm.can_implement(arguments));
-
-  // Initialize CUTLASS kernel with arguments and workspace pointer
-  CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
-
-  // Correctness / Warmup iteration
-  CUTLASS_CHECK(gemm.run());
-
-  // Check if output from CUTLASS kernel and reference kernel are equal or not
-  Result result;
-  result.passed = verify(options);
-
-  std::cout << "  Disposition: " << (result.passed ? "Passed" : "Failed") << std::endl;
-
-  if (!result.passed) {
-    exit(-1);
-  }
-
-  // Run profiling loop
-  if (options.iterations > 0)
-  {
-    GpuTimer timer;
-    timer.start();
-    for (int iter = 0; iter < options.iterations; ++iter) {
-      CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
-      CUTLASS_CHECK(gemm.run());
-    }
-    timer.stop();
-
-    // Compute average runtime and GFLOPs.
-    float elapsed_ms = timer.elapsed_millis();
-    result.avg_runtime_ms = double(elapsed_ms) / double(options.iterations);
-    result.gflops = options.gflops(result.avg_runtime_ms / 1000.0);
-
-    std::string raster = "Heuristic";
-
-    if (options.raster == RasterOrderOptions::AlongN) {
-      raster = "Along N";
-    }
-    else if (options.raster == RasterOrderOptions::AlongM) {
-      raster = "Along M";
-    }
-
-    std::cout << "  Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << std::endl;
-    std::cout << "  Rasterization: " << raster << " with a maximum CTA swizzle of " << options.swizzle << std::endl;
-    std::cout << "  Avg runtime: " << result.avg_runtime_ms << " ms" << std::endl;
-    std::cout << "  GFLOPS: " << result.gflops << std::endl;
-  }
-
-  return 0;
-}
-
+};
 
 template <typename KernelTraits>
 struct WarpSpecialGemm
@@ -397,10 +325,10 @@ struct WarpSpecialGemm
     // Initialize operands to be used in the GEMM and reference GEMM
     void initialize(const Options& options)
     {
-        stride_A = cutlass::make_cute_packed_stride(KernelTraits::StrideA{}, {options.m, options.k, 1});
-        stride_B = cutlass::make_cute_packed_stride(KernelTraits::StrideB{}, {options.n, options.k, 1});
-        stride_C = cutlass::make_cute_packed_stride(KernelTraits::StrideC{}, {options.m, options.n, 1});
-        stride_D = cutlass::make_cute_packed_stride(KernelTraits::StrideD{}, {options.m, options.n, 1});
+        stride_A = cutlass::make_cute_packed_stride(typename KernelTraits::StrideA{}, {options.m, options.k, 1});
+        stride_B = cutlass::make_cute_packed_stride(typename KernelTraits::StrideB{}, {options.n, options.k, 1});
+        stride_C = cutlass::make_cute_packed_stride(typename KernelTraits::StrideC{}, {options.m, options.n, 1});
+        stride_D = cutlass::make_cute_packed_stride(typename KernelTraits::StrideD{}, {options.m, options.n, 1});
 
         block_A.reset(options.m * options.k);
         block_B.reset(options.k * options.n);
@@ -460,7 +388,7 @@ struct WarpSpecialGemm
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Check if output from CUTLASS kernel and reference kernel are equal or not
-        bool passed = cutlass::reference::device::BlockCompareEqual(block_ref_D.get(), block_D.get(), block_D.size());
+        bool passed = cutlass::reference::device::BlockCompareEqual(block_D_ref.get(), block_D.get(), block_D.size());
 
         return passed;
     }
@@ -532,7 +460,7 @@ struct WarpSpecialGemm
           std::cout << "  GFLOPS: " << result.gflops << std::endl;
         }
 
-  return 0;
+        return 0;
 
     }
 
@@ -542,21 +470,21 @@ public:
     //
 
     /// Initialization
-    KernelTraits::StrideA stride_A;
-    KernelTraits::StrideB stride_B;
-    KernelTraits::StrideC stride_C;
-    KernelTraits::StrideD stride_D;
+    typename KernelTraits::StrideA stride_A;
+    typename KernelTraits::StrideB stride_B;
+    typename KernelTraits::StrideC stride_C;
+    typename KernelTraits::StrideD stride_D;
     uint64_t seed;
 
     cutlass::DeviceAllocation<typename KernelTraits::Gemm::ElementA> block_A;
     cutlass::DeviceAllocation<typename KernelTraits::Gemm::ElementB> block_B;
     cutlass::DeviceAllocation<typename KernelTraits::Gemm::ElementC> block_C;
     cutlass::DeviceAllocation<typename KernelTraits::Gemm::EpilogueOutputOp::ElementOutput> block_D;
-    cutlass::DeviceAllocation<typename KernelTraits::Gemm::EpilogueOutputOp::ElementOutput> block_ref_D;
+    cutlass::DeviceAllocation<typename KernelTraits::Gemm::EpilogueOutputOp::ElementOutput> block_D_ref;
 }
 
 #endif // defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
-}
+};
 
 int main(int argc, char const** args)
 {
