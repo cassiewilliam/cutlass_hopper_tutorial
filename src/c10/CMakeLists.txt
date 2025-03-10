@@ -1,3 +1,4 @@
 add_subdirectory(0_handle_gemm)
-add_subdirectory(1_kernel_schedule)
-add_subdirectory(5_mixed_gemm)
+add_subdirectory(1_cute_gemm)
+add_subdirectory(2_cutlass_gemm)
+add_subdirectory(7_mixed_gemm)
