@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <cuda.h>
 #include <iostream>
 
 #include <cutlass/cutlass.h>
@@ -25,7 +26,7 @@
 
 using namespace cute;
 
-namespace c101
+namespace c102
 {
 /**
  * Panic wrapper for unwinding CUTLASS errors
@@ -286,7 +287,7 @@ struct KernelTraits
     using StrideD = typename Gemm::GemmKernel::StrideD;
 };
 
-template <typename KernelTraits>
+template <typename KTraits>
 struct WarpSpecialGemm
 {
 
@@ -325,10 +326,10 @@ struct WarpSpecialGemm
     // Initialize operands to be used in the GEMM and reference GEMM
     void initialize(const Options& options)
     {
-        stride_A = cutlass::make_cute_packed_stride(typename KernelTraits::StrideA{}, {options.m, options.k, 1});
-        stride_B = cutlass::make_cute_packed_stride(typename KernelTraits::StrideB{}, {options.n, options.k, 1});
-        stride_C = cutlass::make_cute_packed_stride(typename KernelTraits::StrideC{}, {options.m, options.n, 1});
-        stride_D = cutlass::make_cute_packed_stride(typename KernelTraits::StrideD{}, {options.m, options.n, 1});
+        stride_A = cutlass::make_cute_packed_stride(typename KTraits::StrideA{}, {options.m, options.k, 1});
+        stride_B = cutlass::make_cute_packed_stride(typename KTraits::StrideB{}, {options.n, options.k, 1});
+        stride_C = cutlass::make_cute_packed_stride(typename KTraits::StrideC{}, {options.m, options.n, 1});
+        stride_D = cutlass::make_cute_packed_stride(typename KTraits::StrideD{}, {options.m, options.n, 1});
 
         block_A.reset(options.m * options.k);
         block_B.reset(options.k * options.n);
@@ -342,14 +343,14 @@ struct WarpSpecialGemm
     }
 
     // Populated a GEMM::Arguments structure from the given commandline options
-    typename KernelTraits::Gemm::Arguments to_underlying_arguments(const Options& options)
+    typename KTraits::Gemm::Arguments to_underlying_arguments(const Options& options)
     {
         // Change device_id to another value if you are running on a machine with multiple GPUs and wish
         // to use a GPU other than that with device ID 0.
         int device_id = 0;
-        cutlass::KernelHardwareInfo kernel_hw_info = cutlass::KernelHardwareInfo::make_kernel_hardware_info<Gemm::GemmKernel>(device_id);
+        cutlass::KernelHardwareInfo kernel_hw_info = cutlass::KernelHardwareInfo::make_kernel_hardware_info<typename KTraits::Gemm::GemmKernel>(device_id);
 
-        typename KernelTraits::Gemm::Arguments arguments
+        typename KTraits::Gemm::Arguments arguments
         {
             cutlass::gemm::GemmUniversalMode::kGemm,
             {options.m, options.n, options.k},
@@ -366,21 +367,21 @@ struct WarpSpecialGemm
 
     bool verify(const Options& options)
     {
-        cutlass::TensorRef ref_A(block_A.get(), KernelTraits::Gemm::LayoutA::packed({options.m, options.k}));
-        cutlass::TensorRef ref_B(block_B.get(), KernelTraits::Gemm::LayoutB::packed({options.k, options.n}));
-        cutlass::TensorRef ref_C(block_C.get(), KernelTraits::Gemm::LayoutC::packed({options.m, options.n}));
-        cutlass::TensorRef ref_D(block_D_ref.get(), KernelTraits::Gemm::LayoutC::packed({options.m, options.n}));
+        cutlass::TensorRef ref_A(block_A.get(), KTraits::Gemm::LayoutA::packed({options.m, options.k}));
+        cutlass::TensorRef ref_B(block_B.get(), KTraits::Gemm::LayoutB::packed({options.k, options.n}));
+        cutlass::TensorRef ref_C(block_C.get(), KTraits::Gemm::LayoutC::packed({options.m, options.n}));
+        cutlass::TensorRef ref_D(block_D_ref.get(), KTraits::Gemm::LayoutC::packed({options.m, options.n}));
 
         // Create instantiation for device reference gemm kernel
-        DeviceGemmReference gemm_reference;
+        typename KTraits::DeviceGemmReference gemm_reference;
 
         // Launch device reference gemm kernel
         gemm_reference(
           {options.m, options.n, options.k},
-          ElementAccumulator(options.alpha),
+          typename KTraits::ElementAccumulator(options.alpha),
           ref_A,
           ref_B,
-          ElementAccumulator(options.beta),
+          typename KTraits::ElementAccumulator(options.beta),
           ref_C,
           ref_D);
 
@@ -398,13 +399,13 @@ struct WarpSpecialGemm
         initialize(options);
 
         // Instantiate CUTLASS kernel depending on templates
-        KernelTraits::Gemm gemm;
+        typename KTraits::Gemm gemm;
 
         // Create a structure of gemm kernel arguments suitable for invoking an instance of Gemm
-        auto arguments = args_from_options(options);
+        auto arguments = to_underlying_arguments(options);
 
         // Using the arguments, query for extra workspace required for matrix multiplication computation
-        size_t workspace_size = KernelTraits::Gemm::get_workspace_size(arguments);
+        size_t workspace_size = KTraits::Gemm::get_workspace_size(arguments);
 
         // Allocate workspace memory
         cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -470,30 +471,30 @@ public:
     //
 
     /// Initialization
-    typename KernelTraits::StrideA stride_A;
-    typename KernelTraits::StrideB stride_B;
-    typename KernelTraits::StrideC stride_C;
-    typename KernelTraits::StrideD stride_D;
+    typename KTraits::StrideA stride_A;
+    typename KTraits::StrideB stride_B;
+    typename KTraits::StrideC stride_C;
+    typename KTraits::StrideD stride_D;
     uint64_t seed;
 
-    cutlass::DeviceAllocation<typename KernelTraits::Gemm::ElementA> block_A;
-    cutlass::DeviceAllocation<typename KernelTraits::Gemm::ElementB> block_B;
-    cutlass::DeviceAllocation<typename KernelTraits::Gemm::ElementC> block_C;
-    cutlass::DeviceAllocation<typename KernelTraits::Gemm::EpilogueOutputOp::ElementOutput> block_D;
-    cutlass::DeviceAllocation<typename KernelTraits::Gemm::EpilogueOutputOp::ElementOutput> block_D_ref;
-}
+    cutlass::DeviceAllocation<typename KTraits::Gemm::ElementA> block_A;
+    cutlass::DeviceAllocation<typename KTraits::Gemm::ElementB> block_B;
+    cutlass::DeviceAllocation<typename KTraits::Gemm::ElementC> block_C;
+    cutlass::DeviceAllocation<typename KTraits::Gemm::EpilogueOutputOp::ElementOutput> block_D;
+    cutlass::DeviceAllocation<typename KTraits::Gemm::EpilogueOutputOp::ElementOutput> block_D_ref;
+};
 
 #endif // defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
-};
+}
 
 int main(int argc, char const** args)
 {
     // CUTLASS must be compiled with CUDA 12.0 Toolkit to run this example
     // and must have compute capability at least 90.
 
-    if (__CUDACC__VER_MAJOR__ < 12)
+    if (__CUDACC_VER_MAJOR__ < 12)
     {
-        std::cerr << "This example requires CUDA 12 or newer. \n"
+        std::cerr << "This example requires CUDA 12 or newer. \n";
         return 0;
     }
 
@@ -513,7 +514,7 @@ int main(int argc, char const** args)
     // Parse options
     //
 
-    Options options;
+    c102::Options options;
 
     options.parse(argc, args);
 
@@ -527,7 +528,7 @@ int main(int argc, char const** args)
     //
 
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
-    c101::WarpSpecialGemm<c101::KernelTraits> gemm;
+    c102::WarpSpecialGemm<c102::KernelTraits> gemm;
     gemm.run(options);
 #endif
 
