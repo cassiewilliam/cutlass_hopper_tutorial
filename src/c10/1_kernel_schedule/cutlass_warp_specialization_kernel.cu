@@ -158,7 +158,7 @@ struct Options {
   /// Prints the usage statement.
   std::ostream & print_usage(std::ostream &out) const {
 
-    out << "48_hopper_warp_specialized_gemm\n\n"
+    out << "hopper_warp_specialized_gemm\n\n"
       << "  Hopper FP32 GEMM using a Warp Specialized kernel.\n\n"
       << "Options:\n\n"
       << "  --help                      If specified, displays this usage statement\n\n"
