@@ -384,7 +384,7 @@ void gemm_nt(int          m,
     // Setup and Launch
     //
     // Launch parameter setup
-    int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(smem_A), decltype(smem_B)));
+    int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(smem_A), decltype(smem_B)>));
     dim3 dim_block(size(tiled_mma));
     dim3 dim_cluster(2, 1, 1);
     dim3 dim_grid(round_up(size(ceil_div(m, tile_M)), dim_cluster.x),
@@ -495,7 +495,7 @@ void gemm_tn(int          m,
     // Setup and Launch
     //
     // Launch parameter setup
-    int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(smem_A), decltype(smem_B)));
+    int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(smem_A), decltype(smem_B)>));
     dim3 dim_block(size(tiled_mma));
     dim3 dim_cluster(2, 1, 1);
     dim3 dim_grid(round_up(size(ceil_div(m, tile_M)), dim_cluster.x),
@@ -554,6 +554,7 @@ void gemm(char      transA,
           int       m,
           int       n,
           int       k,
+          Alpha     alpha,
           TA const* A,
           int       lda,
           TB const* B,
@@ -563,7 +564,7 @@ void gemm(char      transA,
           int       ldc,
           cudaStream_t stream = 0)
 {
-    if (transA = 'N' && transB == 'T')
+    if (transA == 'N' && transB == 'T')
     {
         return gemm_nt(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, stream);
     }
@@ -589,8 +590,8 @@ int main(int argc, char const** args)
 
     cudaDeviceProp props;
     int current_device_id;
-    CUDA_CHECK(cudaGetDevice(&current_device_id));
-    CUDA_CHECK(cudaGetDeviceProperties(&props, current_device_id));
+    CUTE_CHECK_ERROR(cudaGetDevice(&current_device_id));
+    CUTE_CHECK_ERROR(cudaGetDeviceProperties(&props, current_device_id));
 
     cudaError_t error = cudaGetDeviceProperties(&props, 0);
     if (props.major != 9 || props.minor != 0) {
@@ -682,26 +683,27 @@ int main(int argc, char const** args)
 
     // Run once
     d_C = h_C;
-    gemm(transA, transB, m, n, k,
-         alpha,
-         d_A.data().get(), ldA,
-         d_B.data().get(), ldB,
-         beta,
-         d_C.data().get(), ldC);
+    c1010::gemm(trans_A, trans_B,
+                m, n, k,
+                alpha,
+                d_A.data().get(), ldA,
+                d_B.data().get(), ldB,
+                beta,
+                d_C.data().get(), ldC);
     CUTE_CHECK_LAST();
     thrust::host_vector<TC> cute_result = d_C;
 
     // Timing iterations
     timer.start();
-    for (int i = 0; i < timing_iterations; ++i) {
-        gemm(transA, transB, m, n, k,
-            alpha,
-            d_A.data().get(), ldA,
-            d_B.data().get(), ldB,
-            beta,
-            d_C.data().get(), ldC);
+    for (int i = 0; i < iterations; ++i) {
+        c1010::gemm(trans_A, trans_B, m, n, k,
+                    alpha,
+                    d_A.data().get(), ldA,
+                    d_B.data().get(), ldB,
+                    beta,
+                    d_C.data().get(), ldC);
     }
-    double cute_time = timer.seconds() / timing_iterations;
+    double cute_time = timer.seconds() / iterations;
     CUTE_CHECK_LAST();
     printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
 #endif
