@@ -348,7 +348,7 @@ void gemm_nt(int          m,
 
     auto problem_shape = make_shape(M, N, K);       // (M, N, K)
 
-    // define TN strides (mixed)
+    // define NT strides (mixed)
     auto stride_A = make_stride(Int<1>{}, lda);
     auto stride_B = make_stride(Int<1>{}, ldb);
     auto stride_C = make_stride(Int<1>{}, ldc);

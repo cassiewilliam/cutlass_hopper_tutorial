@@ -9,17 +9,32 @@ include_directories(
 )
 remove_definitions(-DTORCH_CUDA=1)
 
-add_executable(c1020_test_cutlass_warp_specialization_kernel 0_warp_specialization_kernel.cu)
+add_executable(c1020_test_cutlass_warp_specialization_gemm 0_warp_specialization_gemm.cu)
 
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
     set_source_files_properties(
-        "0_warp_specialization_kernel.cu"
+        "c1020_test_cutlass_warp_specialization_gemm.cu"
         PROPERTIES
         COMPILE_FLAGS
         "-gencode arch=compute_90a,code=sm_90a")
 else()
-    message(FATAL_ERROR "cutlass 0_warp_specialization_kernel kernel required sm 90a")
+    message(FATAL_ERROR "cutlass warp_specialization_gemm kernel required sm 90a")
 endif()
 
-target_include_directories(c1020_test_cutlass_warp_specialization_kernel PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
-target_link_libraries(c1020_test_cutlass_warp_specialization_kernel PRIVATE nvidia::cutlass::cutlass)
+target_include_directories(c1020_test_cutlass_warp_specialization_gemm PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
+target_link_libraries(c1020_test_cutlass_warp_specialization_gemm PRIVATE nvidia::cutlass::cutlass)
+
+add_executable(c1021_test_cutlass_fp8_warp_specialization_gemm 1_fp8_warp_specialization_gemm.cu)
+
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
+    set_source_files_properties(
+        "1_fp8_warp_specialization_gemm.cu"
+        PROPERTIES
+        COMPILE_FLAGS
+        "-gencode arch=compute_90a,code=sm_90a")
+else()
+    message(FATAL_ERROR "cutlass fp8_warp_specialization_gemm kernel required sm 90a")
+endif()
+
+target_include_directories(c1021_test_cutlass_fp8_warp_specialization_gemm PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
+target_link_libraries(c1021_test_cutlass_fp8_warp_specialization_gemm PRIVATE nvidia::cutlass::cutlass cuda)

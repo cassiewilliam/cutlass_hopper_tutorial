@@ -26,7 +26,7 @@
 
 using namespace cute;
 
-namespace c102
+namespace c1020
 {
 /**
  * Panic wrapper for unwinding CUTLASS errors
@@ -514,7 +514,7 @@ int main(int argc, char const** args)
     // Parse options
     //
 
-    c102::Options options;
+    c1020::Options options;
 
     options.parse(argc, args);
 
@@ -528,7 +528,7 @@ int main(int argc, char const** args)
     //
 
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
-    c102::WarpSpecialGemm<c102::KernelTraits> gemm;
+    c1020::WarpSpecialGemm<c1020::KernelTraits> gemm;
     gemm.run(options);
 #endif
 
