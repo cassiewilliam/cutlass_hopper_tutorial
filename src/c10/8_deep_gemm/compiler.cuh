@@ -60,6 +60,7 @@ public:
 
     // Helper functions
     std::filesystem::path getJitIncludeDir();
+    std::filesystem::path getCutlassIncludeDir();
     std::string getNvccCompiler();
     std::filesystem::path getDefaultUserDir();
     std::filesystem::path getTmpDir();
@@ -118,7 +119,7 @@ std::string Compiler::generateKernel(uint32_t const shape_n, uint32_t const shap
 
     // Include necessary headers
     code << "#include \"cutlass/cutlass.h\"\n";
-    code << "#include \"deep_gemm/fp8_gemm.cuh\"\n\n";
+    code << "#include \"fp8_gemm.cuh\"\n\n";
 
     // Launch function with signature based on gemm type
     code << "extern \"C\" void launch(";
@@ -147,6 +148,12 @@ std::string Compiler::generateKernel(uint32_t const shape_n, uint32_t const shap
 
     code << "{\n";
     code << "    using namespace deep_gemm;\n\n";
+
+    if (std::getenv("TRTLLM_DG_JIT_DEBUG"))
+    {
+        code << "    printf(\"mat_a: %p, ld_a: %d, mat_b: %p, ld_b: %d, mat_d: %p, ld_d: %d, shape_m: %d, grouped_layout: %p \\n\", mat_a, ld_a, mat_b, ld_b, mat_d, ld_d, shape_m, grouped_layout);\n";
+        code << "    printf(\"scales_a: %p, scales_b: %p, stream: %p, num_sms: %d, smem_size: %u\\n\", scales_a, scales_b, stream, num_sms, smem_size);\n";
+    }
 
     // Template parameters
     code << "    // Templated args from JIT compilation\n";
@@ -241,7 +248,7 @@ Runtime* Compiler::build(uint32_t const shape_n, uint32_t const shape_k, uint32_
     std::vector<std::string> flags = nvccFlags;
     flags.push_back(cxxFlagsStr);
 
-    std::vector<std::filesystem::path> includeDirs = {getJitIncludeDir()};
+    std::vector<std::filesystem::path> includeDirs = {getJitIncludeDir(), getCutlassIncludeDir()};
 
     // Build signature - simplified, no MD5 calculation
     std::string name = "gemm_" + std::to_string(shape_n) + "_" + std::to_string(shape_k) + "_" + std::to_string(block_m)
@@ -358,51 +365,27 @@ std::filesystem::path Compiler::getJitIncludeDir()
     static std::filesystem::path includeDir;
     if (includeDir.empty())
     {
-        // Command to execute
-        char const* cmd = "pip show tensorrt_llm 2>/dev/null";
+        // 获取当前文件所在目录
+        std::filesystem::path sourceDir = std::filesystem::path(__FILE__).parent_path();
 
-        // Buffer to store the output
-        std::array<char, 128> buffer;
-        std::string result;
-
-// Open pipe to command
-#ifdef _MSC_VER
-        FILE* pipe = _popen(cmd, "r");
-#else
-        FILE* pipe = popen(cmd, "r");
-#endif
-
-        if (pipe)
-        {
-            // Read the output
-            while (fgets(buffer.data(), buffer.size(), pipe) != nullptr)
-            {
-                result += buffer.data();
-            }
-
-// Close the pipe
-#ifdef _MSC_VER
-            _pclose(pipe);
-#else
-            pclose(pipe);
-#endif
-
-            // Parse the location using regex
-            std::regex locationRegex("Location: (.+)");
-            std::smatch match;
-
-            if (std::regex_search(result, match, locationRegex) && match.size() > 1)
-            {
-                // Get the captured location, trimming any trailing whitespace
-                std::string location = match.str(1);
-                location.erase(location.find_last_not_of(" \n\r\t") + 1);
-
-                // Set the include directory based on the package location
-                includeDir = std::filesystem::path(location) / "tensorrt_llm" / "include";
-            }
-        }
+        // 设定 include 目录
+        includeDir = sourceDir;
     }
     return includeDir;
+}
+
+std::filesystem::path Compiler::getCutlassIncludeDir()
+{
+    static std::filesystem::path cutlassIncludeDir;
+    if (cutlassIncludeDir.empty())
+    {
+        // 获取当前文件所在目录
+        std::filesystem::path sourceDir = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "3rdparty/cutlass/include";
+
+        // 设定 include 目录
+        cutlassIncludeDir = sourceDir;
+    }
+    return cutlassIncludeDir;
 }
 
 std::string Compiler::getNvccCompiler()
@@ -460,21 +443,21 @@ std::filesystem::path Compiler::getDefaultUserDir()
             char const* appData = std::getenv("APPDATA");
             if (appData)
             {
-                userDir = std::filesystem::path(appData) / "tensorrt_llm";
+                userDir = std::filesystem::path(appData) / "deep_gemm";
             }
             else
             {
-                userDir = std::filesystem::temp_directory_path() / "tensorrt_llm";
+                userDir = std::filesystem::temp_directory_path() / "deep_gemm";
             }
 #else
             char const* homeDir = std::getenv("HOME");
             if (homeDir)
             {
-                userDir = std::filesystem::path(homeDir) / ".tensorrt_llm";
+                userDir = std::filesystem::path(homeDir) / ".deep_gemm";
             }
             else
             {
-                userDir = std::filesystem::temp_directory_path() / "tensorrt_llm";
+                userDir = std::filesystem::temp_directory_path() / "deep_gemm";
             }
 #endif
         }

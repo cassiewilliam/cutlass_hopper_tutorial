@@ -48,7 +48,7 @@ endif()
 # setting compiler flags
 set(CMAKE_C_FLAGS    "${CMAKE_C_FLAGS}")
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall -ldl --ptx -keep") # -Xptxas -v
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall -ldl") # -Xptxas -v
 
 # TODO: build for sm_72 & sm_87 on aarch64 platform (Jetson devices)
 if (NOT CMAKE_CUDA_ARCHITECTURES)

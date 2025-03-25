@@ -64,13 +64,13 @@ int get_num_sms()
         error = cudaGetDeviceProperties(&device_prop, device);
         if (error != cudaSuccess)
         {
-            throw std::runtime_error("Failed to get device properties: " + std::string(cudaGetErrorString(error)))
+            throw std::runtime_error("Failed to get device properties: " + std::string(cudaGetErrorString(error)));
         }
 
-        num_sms = device_prop.multiProcessorCount;
+        num_device_sms = device_prop.multiProcessorCount;
     }
 
-    return num_sms;
+    return num_device_sms;
 }
 
 std::string gemm_type_to_string(deep_gemm::GemmType gemm_type)
@@ -226,7 +226,7 @@ GemmConfig get_best_gemm_config(uint32_t shape_m,
     // ？【减少L2 Cache的使用，减少不必要的内存访问和Cache抖动，从而降低 GPU 因功耗过高而降低频率的可能性】
     auto num_waves = get_num_waves(best_block_m, best_block_n);
     auto num_minimal_sms = div_up(div_up(shape_m, best_block_m) * div_up(shape_n, best_block_n) * num_groups, num_waves);
-    auto num_minimal_sms = div_up(max(num_minimal_sms, num_device_sms - 8), best_num_tma_multicast) * best_num_tma_multicast;
+    num_minimal_sms = div_up(max(num_minimal_sms, num_device_sms - 8), best_num_tma_multicast) * best_num_tma_multicast;
 
     DG_HOST_ASSERT((num_minimal_sms <= num_device_sms) && (is_tma_multicast_legal(shape_n, best_block_n, best_num_tma_multicast, num_minimal_sms)));
 

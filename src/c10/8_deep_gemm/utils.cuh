@@ -92,14 +92,46 @@ public:
 #define DG_STATIC_ASSERT(cond, reason) static_assert(cond, reason)
 #endif
 
-namespace c108
-{
-
 template <typename T>
 __device__ __host__ constexpr T ceil_div(T a, T b)
 {
     return (a + b - 1) / b;
 }
+
+
+template <typename Callable, size_t... Indices>
+auto unpack_and_invoke(Callable&& runtime, std::vector<void*>& runtime_args, std::index_sequence<Indices...>)
+{
+    return std::forward<Callable>(runtime)(
+        *reinterpret_cast<void**>(runtime_args[0]),         // void*        mat_a
+        *reinterpret_cast<int*>(runtime_args[1]),           // int          lda
+        *reinterpret_cast<void**>(runtime_args[2]),         // void*        mat_b
+        *reinterpret_cast<int*>(runtime_args[3]),           // int          ld_b
+        *reinterpret_cast<void**>(runtime_args[4]),         // void*        mat_d
+        *reinterpret_cast<int*>(runtime_args[5]),           // int          ld_d
+        reinterpret_cast<float*>(runtime_args[6]),          // float*       scales_a
+        reinterpret_cast<float*>(runtime_args[7]),          // float*       scales_b
+        *reinterpret_cast<uint32_t*>(runtime_args[8]),      // uint32_t     shape_m,
+        reinterpret_cast<int*>(runtime_args[9]),            // int*         grouped_layout
+        *reinterpret_cast<cudaStream_t*>(runtime_args[10]), // cudaStream_t stream
+        *reinterpret_cast<int*>(runtime_args[11]),          // int          num_sms
+        *reinterpret_cast<uint32_t*>(runtime_args[12])      // uint32_t     smem_size
+    );
+}
+
+template <typename Callable>
+auto invoke_runtime(Callable&& runtime, std::vector<void*>& runtime_args)
+{
+    if (runtime_args.size() != 13)
+    {
+        throw std::runtime_error("Argument size mismatch! Expected 13 arguments.");
+    }
+
+    return unpack_and_invoke(std::forward<Callable>(runtime), runtime_args, std::make_index_sequence<13>{});
+}
+
+namespace c108
+{
 
 // NOTE(Alan): fp8 min max match with torch
 static constexpr float FP8_E4M3_MAX = 448.0f;
@@ -118,7 +150,7 @@ __global__ void compute_amax_per_token(const float* tensor, float* amax, int m, 
     // 每个线程遍历自己的部分列，取最大值
     for (int i = tid; i < n; i += blockDim.x)
     {
-        max_val = fmaxf(max_val, fabsf(x[row * n + i]));
+        max_val = fmaxf(max_val, fabsf(tensor[row * n + i]));
     }
 
     // 使用 shfl 在warp内部进行规约
@@ -142,15 +174,10 @@ __global__ void cast_to_fp8_with_scale(const float* tensor, float* amax, __nv_fp
     if (row < m && col < n)
     {
         float scale = FP8_E4M3_MAX / amax[row];
-        float value = fmax(-FP8_E4M3_MAX, fmin(x[row * n + col] * scale, FP8_E4M3_MAX));
+        float value = fmax(-FP8_E4M3_MAX, fmin(tensor[row * n + col] * scale, FP8_E4M3_MAX));
 
         fp8_tensor[row * n + col] = static_cast<__nv_fp8_e4m3>(value);
     }
-}
-
-__device__ __forceinline__ int ceil_div(int a, int b)
-{
-    return (a + b - 1) / b;
 }
 
 // 将Tensor进行Reshape，按照Block128x128的形式进行排列
@@ -222,7 +249,7 @@ static void matmul_cublas(const float* d_A,
 // 那么input最终shape变为了[B * S * (H / 128), 128]，那么此时m就为B * S * (H / 128)， n为128
 static void per_token_cast_to_fp8(float* tensor, float* amax, __nv_fp8_e4m3* fp8_tensor, int m, int n, cudaStream_t stream)
 {
-    DG_HOST_ASSERT(n % 128 == 0)
+    DG_HOST_ASSERT(n % 128 == 0);
 
     int reshape_m = m * n / 128;
     int reshape_n = 128;
@@ -238,7 +265,7 @@ static void per_token_cast_to_fp8(float* tensor, float* amax, __nv_fp8_e4m3* fp8
 
 static void per_block_cast_to_fp8(float* tensor, float* amax, __nv_fp8_e4m3* fp8_tensor, int m, int n, cudaStream_t stream)
 {
-    DG_HOST_ASSERT(n % 128 == 0)
+    DG_HOST_ASSERT(n % 128 == 0);
     
     int padded_m = ceil_div<int>(m, 128) * 128;
     int padded_n = ceil_div<int>(n, 128) * 128;
@@ -263,7 +290,7 @@ static void per_block_cast_to_fp8(float* tensor, float* amax, __nv_fp8_e4m3* fp8
     cudaMalloc(&reshaped_tensor, reshape_m * reshape_n * sizeof(float));
     cudaMemset(reshaped_tensor, 0, reshape_m * reshape_n * sizeof(float));
     dim3 block_size(128, 128);
-    dim3 grid_size(ceil_div<int>(padded_m, 128), ceil_div<int>(padded_n, 128))
+    dim3 grid_size(ceil_div<int>(padded_m, 128), ceil_div<int>(padded_n, 128));
     reshape_tensor_to_block128x128<<<grid_size, block_size, 0, stream>>>(padded_tensor, reshaped_tensor, padded_m, padded_n);
 
     // Step3. Quantization Tensor
@@ -279,7 +306,7 @@ static void per_block_cast_to_fp8(float* tensor, float* amax, __nv_fp8_e4m3* fp8
     cudaDeviceSynchronize();
 
     // Step4. Inv Reshape Tensor
-    float* reshaped_fp8_tensor;
+    __nv_fp8_e4m3* reshaped_fp8_tensor;
     cudaMalloc(&reshaped_fp8_tensor, padded_m * padded_n * sizeof(__nv_fp8_e4m3));
     cudaMemset(reshaped_fp8_tensor, 0, padded_m * padded_n * sizeof(__nv_fp8_e4m3));
     reshape_block128x128_to_tensor<<<grid_size, block_size, 0, stream>>>(quantized_fp8_tensor, reshaped_fp8_tensor, padded_m, padded_n);

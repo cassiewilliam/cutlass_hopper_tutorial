@@ -2,6 +2,7 @@
 
 #include "runtime.cuh"
 #include "compiler.cuh"
+#include "utils.cuh"
 
 namespace deep_gemm::jit
 {
@@ -19,19 +20,18 @@ public:
                                  int,                  // num_tma_multicast
                                  deep_gemm::GemmType>; // gemm_type
 
-    using RuntimeArgs = std::vector<void *>; // 存在参数数量和位置变化
-
     using SpaceType = std::vector<std::unordered_map<std::string, std::string>>;
 
 public:
 
     JITTuner() = default;
 
+    template <typename... Args>
     Runtime* compile_and_tune(const std::string&                           name,
                               std::unordered_map<std::string, std::string> keys,
-                              const SpaceType&                             space,
+                              SpaceType&                                   space,
                               const BuildArgs&                             build_args,
-                              const RuntimeArgs&                           runtime_args)
+                              Args&&...                                    runtime_args)
     {
         // 对 keys 排序，确保一致性
         std::vector<std::pair<std::string, std::string>> sorted_keys(keys.begin(), keys.end());
@@ -56,26 +56,26 @@ public:
 
         // 保证最少执行一次
         if (space.empty()) {
-            space.push_back({});
+            space.push_back(std::unordered_map<std::string, std::string>{});
         }
         std::vector<std::pair<Runtime*, std::unordered_map<std::string, std::string>>> kernels;
         for (const auto& tuned_keys : space)
         {
             std::unordered_map<std::string, std::string> full_keys = keys;
             full_keys.insert(tuned_keys.begin(), tuned_keys.end());
-            auto& runtime = getGlobalCompiler().build(build_args[0], // uint32_t const shape_n
-                                                      build_args[1], // uint32_t const shape_k
-                                                      build_args[2], // uint32_t const block_m
-                                                      build_args[3], // uint32_t const block_n
-                                                      build_args[4], // uint32_t const block_k
-                                                      build_args[5], // uint32_t const num_groups
-                                                      build_args[6], // uint32_t const num_stages
-                                                      build_args[7], // uint32_t const num_tma_multicast
-                                                      gemm_type);    // deep_gemm::GemmType const gemm_type
+            auto&& runtime = getGlobalCompiler().build(std::get<0>(build_args),  // uint32_t const shape_n
+                                                       std::get<1>(build_args),  // uint32_t const shape_k
+                                                       std::get<2>(build_args),  // uint32_t const block_m
+                                                       std::get<3>(build_args),  // uint32_t const block_n
+                                                       std::get<4>(build_args),  // uint32_t const block_k
+                                                       std::get<5>(build_args),  // uint32_t const num_groups
+                                                       std::get<6>(build_args),  // uint32_t const num_stages
+                                                       std::get<7>(build_args),  // uint32_t const num_tma_multicast
+                                                       std::get<8>(build_args)); // deep_gemm::GemmType const gemm_type
             kernels.emplace_back(runtime, tuned_keys);
         }
 
-        Runtime* best_runtime;
+        Runtime* best_runtime = nullptr;
         float best_time = std::numeric_limits<float>::max();
         std::unordered_map<std::string, std::string> best_keys;
 
@@ -85,11 +85,16 @@ public:
         for (auto& [runtime, tuned_keys] : kernels) {
             float elapsed_time = 0.0f;
             if (space.size() > 1) {
-                if (*runtime(runtime_args) != 0) continue;
+
+                try {
+                    (*runtime)(std::forward<Args>(runtime_args)...);
+                } catch (...) {
+                    continue;
+                }
 
                 cudaEventRecord(start_event);
                 for (int i = 0; i < 20; ++i) {
-                    DG_HOST_ASSERT(*runtime(args) == 0);
+                    (*runtime)(std::forward<Args>(runtime_args)...);
                 }
                 cudaEventRecord(end_event);
                 cudaEventSynchronize(end_event);
@@ -105,7 +110,6 @@ public:
         cudaEventDestroy(start_event);
         cudaEventDestroy(end_event);
 
-        DG_HOST_ASSERT(best_runtime->is_valid());
         tuned[key_signature] = best_runtime;
         return best_runtime;
     }
@@ -134,7 +138,7 @@ public:
 
 private:
 
-    std::unordered_map<std::string, Runtime> tuned;
+    std::unordered_map<std::string, Runtime*> tuned;
 };
 
 }

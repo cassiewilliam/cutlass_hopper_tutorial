@@ -1,9 +1,67 @@
-#include "utils.cuh"
-#include "jit_utils.cuh"
-#include "deep_gemm.h"
+#pragma once
+
+#include <cuda_runtime.h>
+
+#include "compiler.cuh"
+#include "jit_tunner.cuh"
 
 namespace c108
 {
+
+class DeepGemmRunner
+{
+public:
+
+    DeepGemmRunner()
+    {
+        m_jittuner = std::make_shared<deep_gemm::jit::JITTuner>();
+    }
+
+    ~DeepGemmRunner() {}
+
+    void tunning(int m, int n, int k, int num_groups, deep_gemm::GemmType type, cudaStream_t stream = 0);
+
+    void gemm(int          m,
+              int          n,
+              int          k,
+              void*        A,
+              float*       A_scales,
+              void*        B,
+              float*       B_scales,
+              void*        C,
+              cudaStream_t stream = 0);
+
+    void group_gemm_contiguous(int          m,
+                                int          n,
+                                int          k,
+                                float        alpha,
+                                void const*  A,
+                                int          lda,
+                                void const*  B,
+                                int          ldb,
+                                float        beta,
+                                void*        C,
+                                int          ldc,
+                                cudaStream_t stream = 0);
+
+    void group_gemm_masked(int          m,
+                            int          n,
+                            int          k,
+                            float        alpha,
+                            void const*  A,
+                            int          lda,
+                            void const*  B,
+                            int          ldb,
+                            float        beta,
+                            void*        C,
+                            int          ldc,
+                            cudaStream_t stream = 0);
+
+private:
+
+    std::shared_ptr<deep_gemm::jit::JITTuner> m_jittuner;
+};
+
 
 void DeepGemmRunner::tunning(int m, int n, int k, int num_groups, deep_gemm::GemmType type, cudaStream_t stream)
 {
@@ -64,44 +122,42 @@ void DeepGemmRunner::tunning(int m, int n, int k, int num_groups, deep_gemm::Gem
 
         cublasHandle_t handle;
         cublasCreate(&handle);
-        matmul_cublas(device_A.data(),
-                      device_B.data(),
-                      device_C.data(),
+        matmul_cublas(thrust::raw_pointer_cast(device_A.data()),
+                      thrust::raw_pointer_cast(device_B.data()),
+                      thrust::raw_pointer_cast(device_C.data()),
                       m, k, n, handle);
         cublasDestroy(handle);
 
         thrust::device_vector<__nv_fp8_e4m3> lhs_activation_a_x_fp8(m * k);
         thrust::device_vector<float> lhs_activation_a_x_scales(m * ceil_div(k, 128) * 128);
-        per_token_cast_to_fp8(device_A.data(),
-                              lhs_activation_a_x_scales.data(),
-                              lhs_activation_a_x_fp8.data(),
+        per_token_cast_to_fp8(thrust::raw_pointer_cast(device_A.data()),
+                              thrust::raw_pointer_cast(lhs_activation_a_x_scales.data()),
+                              thrust::raw_pointer_cast(lhs_activation_a_x_fp8.data()),
                               m,
                               k,
                               stream);
 
         thrust::device_vector<__nv_fp8_e4m3> rhs_weight_b_y_fp8(n * k);
         thrust::device_vector<float> rhs_weight_b_y_scales(ceil_div(n, 128) * 128 * ceil_div(k, 128) * 128);
-        per_block_cast_to_fp8(device_B.data(),
-                              rhs_weight_b_y_scales.data(),
-                              rhs_weight_b_y_fp8.data(),
+        per_block_cast_to_fp8(thrust::raw_pointer_cast(device_B.data()),
+                              thrust::raw_pointer_cast(rhs_weight_b_y_scales.data()),
+                              thrust::raw_pointer_cast(rhs_weight_b_y_fp8.data()),
                               n,
                               k,
                               stream);
 
         thrust::device_vector<__nv_bfloat16> output(m * n);
-        deep_gemm::jit::JITTuner::RuntimeArgs runtime_args{
-            (void *)(lhs_activation_a_x_fp8.data()),
-            (void *)(lhs_activation_a_x_scales.data()),
-            (void *)(rhs_weight_b_y_fp8.data()),
-            (void *)(rhs_weight_b_y_scales.data()),
-            (void *)(output.data()),
-            (void *)(&m),
-            (void *)(&stream),
-            (void *)(&std::get<0>(config)),
-            (void *)(&std::get<5>(config))
-        };
 
-        m_jittuner->compile_and_tune(name, keys, space, build_args, runtime_args);
+        uint32_t num_sms = std::get<0>(config);
+        uint32_t smem_size = std::get<5>(config);
+        m_jittuner->compile_and_tune(name, keys, space, build_args,
+            (void *)(thrust::raw_pointer_cast(lhs_activation_a_x_fp8.data())), k,
+            (void *)(thrust::raw_pointer_cast(rhs_weight_b_y_fp8.data())), k,
+            (void *)(thrust::raw_pointer_cast(output.data())), n,
+            (float *)(thrust::raw_pointer_cast(lhs_activation_a_x_scales.data())),
+            (float *)(thrust::raw_pointer_cast(rhs_weight_b_y_scales.data())),
+            m, nullptr, stream, num_sms, smem_size
+        );
     }
     else if (type == deep_gemm::GemmType::GroupedContiguous)
     {
@@ -121,11 +177,11 @@ void DeepGemmRunner::gemm(int          m,
                           int          n,
                           int          k,
                           void*        A,
-                          void*        A_scales,
+                          float*       A_scales,
                           void*        B,
-                          void*        B_scales,
+                          float*       B_scales,
                           void*        C,
-                          cudaStream_t stream = 0)
+                          cudaStream_t stream)
 {
 
     std::string name = "gemm_fp8_fp16_bf16_nt";
@@ -153,18 +209,11 @@ void DeepGemmRunner::gemm(int          m,
 
     auto runtime = m_jittuner->get_best_runtime(name, keys);
 
-    deep_gemm::jit::JITTuner::RuntimeArgs runtime_args{
-        A
-        A_scales,
-        B
-        B_scales,
-        C,
-        (void *)(&m),
-        (void *)(&stream),
-        (void *)(&std::get<0>(config)), // num_sms
-        (void *)(&std::get<5>(config))  // smem_size
-    };
-    (*runtime)(runtime_args);
+    uint32_t num_minimal_sms = std::get<0>(config);
+    uint32_t smem_size = std::get<5>(config);
+
+    (*runtime)(A, k, B, k, C, n, A_scales, B_scales, m, nullptr, stream, num_minimal_sms, smem_size);
 }
+
 
 }
