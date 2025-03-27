@@ -34,6 +34,7 @@ namespace deep_gemm
 
 enum class GemmType
 {
+    PerTensorQuant,
     Normal,
     GroupedContiguous,
     GroupedMasked,
@@ -59,6 +60,74 @@ __device__ __forceinline__ void get_swizzled_block_idx(
     m_block_idx = in_group_idx / num_n_blocks_in_group;
     n_block_idx = first_n_block_idx + in_group_idx % num_n_blocks_in_group;
 }
+
+template <uint32_t SHAPE_N, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t kNumGroups, uint32_t kNumTMAMulticast,
+    uint32_t kNumNBlocks = ceil_div(SHAPE_N, BLOCK_N), uint32_t kNumNBlocksPerGroup = 16>
+struct PerTensorQuantScheduler
+{
+    static constexpr GemmType gemm_type = GemmType::PerTensorQuant;
+
+    int current_iter = -1;
+    uint32_t num_aligned_m_blocks;
+    uint32_t num_blocks;
+
+    struct Input
+    {
+        uint32_t shape_m;
+        int* grouped_layout; // no use
+    };
+
+    PerTensorQuantScheduler() {}
+
+    __device__ __forceinline__ PerTensorQuantScheduler(Input& input)
+    {
+        // NOTE: M维度按照BLOCK_M进行切分，总共需要切多少块，进行向上取整
+        num_aligned_m_blocks = ceil_div(input.shape_m, BLOCK_M);
+        // NOTE: 块数由M的块数和N的块数共同决定，由于M是输入Token的数量，是变化的
+        //       N是权重矩阵的数量，属于常量，所以可以将两者分别计算
+        num_blocks = num_aligned_m_blocks * kNumNBlocks;
+    }
+
+    __device__ __forceinline__ uint32_t get_global_m_idx(uint32_t const& block_idx)
+    {
+        return block_idx * BLOCK_M;
+    }
+
+    __device__ __forceinline__ uint32_t get_global_n_idx(
+        uint32_t const shape_dim, uint32_t const block_size, uint32_t const& block_idx, uint32_t const& m_block_idx = 0)
+    {
+        return block_idx * block_size;
+    }
+
+    __device__ __forceinline__ uint32_t get_global_scales_a_idx(uint32_t const& block_idx)
+    {
+        return block_idx;
+    }
+
+    __device__ __forceinline__ uint32_t get_global_scales_b_idx(
+        uint32_t const shape_dim, uint32_t const block_size, uint32_t const& block_idx, uint32_t const& m_block_idx = 0)
+    {
+        return block_idx * block_size;
+    }
+
+    __device__ __forceinline__ bool get_next_block(uint32_t& m_block_idx, uint32_t& n_block_idx)
+    {
+        ++current_iter;
+        //         下一个Block的ID = 当前轮次 * GridDim.x + perCTA Index
+        //         总共有num_blocks这么多个数据，我们可以将其看成一维的数据，
+        //         具体可以将block_id理解为：[0, 1, 2, 3, ... , num_blocks - 1]
+        //         当前从一维的块block，找到当前CTA需要计算的block id
+        auto const next_block_idx = current_iter * gridDim.x + blockIdx.x;
+        if (next_block_idx >= num_blocks)
+        {
+            return false;
+        }
+        // 将获取到的一维的block id进行映射
+        get_swizzled_block_idx<kNumTMAMulticast, kNumNBlocks, kNumNBlocksPerGroup>(
+            num_aligned_m_blocks, next_block_idx, m_block_idx, n_block_idx);
+        return true;
+    }
+};
 
 template <uint32_t SHAPE_N, uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t kNumGroups, uint32_t kNumTMAMulticast,
     uint32_t kNumNBlocks = ceil_div(SHAPE_N, BLOCK_N), uint32_t kNumNBlocksPerGroup = 16>
@@ -451,6 +520,9 @@ struct SchedulerSelector
 {
     static constexpr auto select_type()
     {
+        if constexpr (GT == GemmType::PerTensorQuant)
+            return PerTensorQuantScheduler<SHAPE_N, BLOCK_M, BLOCK_N, kNumGroups, kNumTMAMulticast, kNumNBlocks,
+                kNumNBlocksPerGroup>();
         if constexpr (GT == GemmType::Normal)
             return NormalScheduler<SHAPE_N, BLOCK_M, BLOCK_N, kNumGroups, kNumTMAMulticast, kNumNBlocks,
                 kNumNBlocksPerGroup>();
