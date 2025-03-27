@@ -2,4 +2,5 @@
 # add_subdirectory(1_cute_gemm)
 # add_subdirectory(2_cutlass_gemm)
 # add_subdirectory(7_mixed_gemm)
-add_subdirectory(8_deep_gemm)
+# add_subdirectory(8_deep_gemm)
+add_subdirectory(9_fp8_gemm)

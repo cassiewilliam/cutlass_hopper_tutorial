@@ -27,8 +27,8 @@ option(BUILD_FAST_MATH "Build in fast math mode" ON)
 set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/cutlass)
 set(CUTLASS_TOOLS_HEAD_DIR ${PROJECT_SOURCE_DIR}/3rdparty/cutlass/tools/util/include)
-set(CUTLASS_HEADER_DIR $${PROJECT_SOURCE_DIR}/3rdparty/cutlass/include)
-set(COMMON_HEADER_DIR $${PROJECT_SOURCE_DIR}/include)
+set(CUTLASS_HEADER_DIR ${PROJECT_SOURCE_DIR}/3rdparty/cutlass/include)
+set(COMMON_HEADER_DIR ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
 
 set(CXX_STD "17" CACHE STRING "C++ standard")
 # enable gold linker for binary and .so
@@ -117,5 +117,5 @@ if (MSVC)
   endforeach()
 endif()
 
-include_directories()
+include_directories(${COMMON_HEADER_DIR})
 add_subdirectory(src)

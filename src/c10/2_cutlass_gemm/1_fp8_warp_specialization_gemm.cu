@@ -313,6 +313,7 @@ cutlass::HostTensor<ElementB  , LayoutB  > tensor_B;
 cutlass::HostTensor<ElementC  , LayoutC  > tensor_C;
 cutlass::HostTensor<ElementD  , LayoutD  > tensor_D;
 cutlass::HostTensor<ElementD  , LayoutD  > tensor_ref_D;
+cutlass::HostTensor<ElementD  , LayoutD  > vllm_tensor_ref_D;
 cutlass::HostTensor<ElementAux, LayoutAux> tensor_aux;
 cutlass::HostTensor<ElementAux, LayoutAux> tensor_ref_aux;
 
