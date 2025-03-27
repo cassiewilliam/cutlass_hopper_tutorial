@@ -221,3 +221,38 @@ struct Result
   {}
 
 };
+
+
+template <typename Element, typename Layout>
+void compare_tensors(const cutlass::HostTensor<Element, Layout>& tensor_A,
+                     const cutlass::HostTensor<Element, Layout>& tensor_B) {
+    auto view_A = tensor_A.host_view();
+    auto view_B = tensor_B.host_view();
+
+    if (view_A.extent() != view_B.extent()) {
+        std::cerr << "Error: Tensor dimensions do not match!\n";
+        return;
+    }
+
+    int rows = view_A.extent().at(0);
+    int cols = view_A.extent().at(1);
+
+    bool differences_found = false;
+
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            Element value_A = view_A.at({i, j});
+            Element value_B = view_B.at({i, j});
+
+            if (value_A != value_B) {
+                std::cout << "Mismatch at (" << i << ", " << j << "): "
+                          << "ref = " << value_A << ", test = " << value_B << std::endl;
+                differences_found = true;
+            }
+        }
+    }
+
+    if (!differences_found) {
+        std::cout << "Tensors are identical.\n";
+    }
+}

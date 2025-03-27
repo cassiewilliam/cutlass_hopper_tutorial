@@ -34,6 +34,7 @@ namespace deep_gemm
 
 enum class GemmType
 {
+    PerTensorGEMM,
     Normal,
     GroupedContiguous,
     GroupedMasked,

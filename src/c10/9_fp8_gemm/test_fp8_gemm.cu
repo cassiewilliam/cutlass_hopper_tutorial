@@ -1,6 +1,7 @@
 
 #include "include/fp8_gemm_utils.h"
 #include "src/c10/9_fp8_gemm/0_fp8_warp_specialization_gemm/fp8_warp_specialization_gemm.cuh"
+#include "src/c10/9_fp8_gemm/1_deep_gemm_w8a8/deep_gemm_runner.h"
 
 /// Initialization
 
@@ -24,7 +25,7 @@ cutlass::HostTensor<ElementA  , LayoutA  > tensor_A;
 cutlass::HostTensor<ElementB  , LayoutB  > tensor_B;
 cutlass::HostTensor<ElementD  , LayoutD  > tensor_D;
 cutlass::HostTensor<ElementD  , LayoutD  > tensor_D_ref;
-cutlass::HostTensor<ElementD  , LayoutD  > tensor_D_vllm;
+cutlass::HostTensor<ElementD  , LayoutD  > tensor_D_deepgemm;
 
 using LayoutScalar = cutlass::layout::PackedVectorLayout;
 cutlass::HostTensor<ElementScalar, LayoutScalar> scalar_alpha;
@@ -84,26 +85,26 @@ void initialize(const Options<RasterOrderOptions> &options) {
   stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(options.m, options.n, options.l));
 
   auto a_coord = cutlass::make_Coord(options.m * options.l, options.k);
-  auto c_coord = cutlass::make_Coord(options.m * options.l, options.n);
   auto b_coord = cutlass::make_Coord(options.k, options.n * options.l);
+  auto d_coord = cutlass::make_Coord(options.m * options.l, options.n);
 
   tensor_A.resize(a_coord);
   tensor_B.resize(b_coord);
-  tensor_D.resize(c_coord);
-  tensor_D_ref.resize(c_coord);
-  tensor_D_vllm.resize(c_coord);
+  tensor_D.resize(d_coord);
+  tensor_D_ref.resize(d_coord);
+  tensor_D_deepgemm.resize(d_coord);
 
   initialize_tensor(tensor_A.host_view(), seed + 2022);
   initialize_tensor(tensor_B.host_view(), seed + 2023);
 
   std::fill(tensor_D.host_data(), tensor_D.host_data() + tensor_D.capacity(), 0);
   std::fill(tensor_D_ref.host_data(), tensor_D_ref.host_data() + tensor_D_ref.capacity(), 0);
-  std::fill(tensor_D_vllm.host_data(), tensor_D_vllm.host_data() + tensor_D_vllm.capacity(), 0);
+  std::fill(tensor_D_deepgemm.host_data(), tensor_D_deepgemm.host_data() + tensor_D_deepgemm.capacity(), 0);
 
   tensor_A.sync_device();
   tensor_B.sync_device();
   tensor_D.sync_device();
-  tensor_D_vllm.sync_device();
+  tensor_D_deepgemm.sync_device();
 
   if (options.device_scale) {
     scalar_alpha.resize(cutlass::make_Coord(1));
@@ -198,11 +199,21 @@ bool verify(const Options<RasterOrderOptions> &options, std::string name = "cutl
   {
     tensor_D.sync_host();
     passed = cutlass::reference::host::TensorEquals(tensor_D_ref.host_view(), tensor_D.host_view());
+
+    if (!passed)
+    {
+      compare_tensors(tensor_D_ref, tensor_D);
+    }
   }
-  else if (name == "vllm")
+  else if (name == "deepgemm")
   {
-    tensor_D_vllm.sync_host();
-    passed = cutlass::reference::host::TensorEquals(tensor_D_ref.host_view(), tensor_D_vllm.host_view());
+    tensor_D_deepgemm.sync_host();
+    passed = cutlass::reference::host::TensorEquals(tensor_D_ref.host_view(), tensor_D_deepgemm.host_view());
+
+    if (!passed)
+    {
+      compare_tensors(tensor_D_ref, tensor_D_deepgemm);
+    }
   }
 
   return passed;
@@ -282,61 +293,73 @@ int run_gemm(Options<RasterOrderOptions> &options)
 /// Execute a given example GEMM computation
 int run_deepgemm_fp8_gemm(Options<RasterOrderOptions> &options)
 {
-    // cutlass_scaled_mm(tensor_D_vllm.device_data(), // half*                res,
-    //                   1,                           // int                  batchCount,
-    //                   options.m,                   // int                  m,
-    //                   options.n,                   // int                  n,
-    //                   options.k,                   // int                  k,
-    //                   (int64_t)0,                  // int64_t              stride_a,
-    //                   (int64_t)0,                  // int64_t              stride_b,
-    //                   (int64_t)0,                  // int64_t              stride_d,
-    //                   &options.alpha,              // const float*         alpha,
-    //                   &options.beta,               // const float*         beta,
-    //                   tensor_A.device_data(),      // const __nv_fp8_e4m3* input,
-    //                   tensor_B.device_data(),      // const __nv_fp8_e4m3* kernel,
-    //                   &options.scale_a,            // const float*         input_scale,
-    //                   &options.scale_b,            // const float*         kernel_scale,
-    //                   0);                          // cudaStream_t         stream
+    auto gemm_runner = std::make_shared<c108::DeepGemmRunner>();
 
-    // // Check if output from CUTLASS kernel and reference kernel are equal or not
-    // Result result;
-    // result.passed = verify(options, "vllm");
+    deep_gemm::GemmType gemm_type = deep_gemm::GemmType::PerTensorQuant;
+    gemm_runner->tunning(options.m, options.n, options.k, 1, gemm_type);
 
-    // std::cout << "  vllm w8a8 fp8 gemm Disposition: " << (result.passed ? "Passed" : "Failed") << std::endl;
+    gemm_runner->per_tensor_gmm((half *)(tensor_D_deepgemm.device_data()), // half*                res,
+                                options.m,                                 // int                  m,
+                                options.n,                                 // int                  n,
+                                options.k,                                 // int                  k,
+                                options.alpha,                             // const float&         alpha,
+                                options.beta,                              // const float&         beta,
+                                (__nv_fp8_e4m3 *)(tensor_A.device_data()), // const __nv_fp8_e4m3* input,
+                                (__nv_fp8_e4m3 *)(tensor_B.device_data()), // const __nv_fp8_e4m3* kernel,
+                                &options.scale_a,                          // const float&         input_scale,
+                                &options.scale_b,                          // const float&         kernel_scale,
+                                0);                                        // cudaStream_t         stream
 
-    // if (!result.passed) {
-    //     exit(-1);
-    // }
+    // Check if output from CUTLASS kernel and reference kernel are equal or not
+    Result result;
+    result.passed = verify(options, "deepgemm");
 
-    // // Run profiling loop
-    // if (options.iterations > 0)
-    // {
-    //     GpuTimer timer;
-    //     timer.start();
-    //     for (int iter = 0; iter < options.iterations; ++iter) {
-    //     CUTLASS_CHECK(gemm.run());
-    //     }
-    //     timer.stop();
+    std::cout << "  deepgemm w8a8 fp8 gemm Disposition: " << (result.passed ? "Passed" : "Failed") << std::endl;
 
-    //     // Compute average runtime and GFLOPs.
-    //     float elapsed_ms = timer.elapsed_millis();
-    //     result.avg_runtime_ms = double(elapsed_ms) / double(options.iterations);
-    //     result.gflops = options.gflops(result.avg_runtime_ms / 1000.0);
+    if (!result.passed) {
+        exit(-1);
+    }
 
-    //     std::string raster = "Heuristic";
+    // Run profiling loop
+    if (options.iterations > 0)
+    {
+        GpuTimer timer;
+        timer.start();
+        for (int iter = 0; iter < options.iterations; ++iter)
+        {
+            gemm_runner->per_tensor_gmm((half *)(tensor_D_deepgemm.device_data()), // half*                res,
+                                        options.m,                                 // int                  m,
+                                        options.n,                                 // int                  n,
+                                        options.k,                                 // int                  k,
+                                        options.alpha,                             // const float&         alpha,
+                                        options.beta,                              // const float&         beta,
+                                        (__nv_fp8_e4m3 *)(tensor_A.device_data()), // const __nv_fp8_e4m3* input,
+                                        (__nv_fp8_e4m3 *)(tensor_B.device_data()), // const __nv_fp8_e4m3* kernel,
+                                        &options.scale_a,                           // const float&         input_scale,
+                                        &options.scale_b,                           // const float&         kernel_scale,
+                                        0);                                        // cudaStream_t         stream
+        }
+        timer.stop();
 
-    //     if (options.raster == RasterOrderOptions::AlongN) {
-    //     raster = "Along N";
-    //     }
-    //     else if (options.raster == RasterOrderOptions::AlongM) {
-    //     raster = "Along M";
-    //     }
+        // Compute average runtime and GFLOPs.
+        float elapsed_ms = timer.elapsed_millis();
+        result.avg_runtime_ms = double(elapsed_ms) / double(options.iterations);
+        result.gflops = options.gflops(result.avg_runtime_ms / 1000.0);
 
-    //     std::cout << "  Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << 'x' << options.l << std::endl;
-    //     std::cout << "  Rasterization: " << raster << " with a maximum CTA swizzle of " << options.swizzle << std::endl;
-    //     std::cout << "  Avg runtime: " << result.avg_runtime_ms << " ms" << std::endl;
-    //     std::cout << "  GFLOPS: " << result.gflops << std::endl;
-    // }
+        std::string raster = "Heuristic";
+
+        if (options.raster == RasterOrderOptions::AlongN) {
+            raster = "Along N";
+        }
+        else if (options.raster == RasterOrderOptions::AlongM) {
+            raster = "Along M";
+        }
+
+        std::cout << "  Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << 'x' << options.l << std::endl;
+        std::cout << "  Rasterization: " << raster << " with a maximum CTA swizzle of " << options.swizzle << std::endl;
+        std::cout << "  Avg runtime: " << result.avg_runtime_ms << " ms" << std::endl;
+        std::cout << "  GFLOPS: " << result.gflops << std::endl;
+    }
 
     return 0;
 }
@@ -387,8 +410,7 @@ int main(int argc, char const** args)
 
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
     c109::run_gemm<c109::Gemm>(options);
-
-    // run_deepgemm_fp8_gemm(options);
+    c109::run_deepgemm_fp8_gemm(options);
 #endif
 
     return 0;

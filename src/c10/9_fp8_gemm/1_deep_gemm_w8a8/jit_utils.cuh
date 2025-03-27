@@ -77,6 +77,7 @@ std::string gemm_type_to_string(deep_gemm::GemmType gemm_type)
 {
     switch (gemm_type)
     {
+    case deep_gemm::GemmType::PerTensorQuant: return std::string("PerTensorQuant");
     case deep_gemm::GemmType::Normal: return std::string("Normal");
     case deep_gemm::GemmType::GroupedContiguous: return std::string("GroupedContiguous");
     case deep_gemm::GemmType::GroupedMasked: return std::string("GroupedMasked");

@@ -67,6 +67,13 @@ public:
             // Load launch function
             switch (gemm_type_)
             {
+            case deep_gemm::GemmType::PerTensorQuant:
+                launchFuncPerTensorGEMM_ = reinterpret_cast<LaunchFuncPerTensorGEMM>(GetProcAddress((HMODULE) lib_, "launch"));
+                if (!launchFuncPerTensorGEMM_)
+                {
+                    throw std::runtime_error("Failed to find launch function: " + std::to_string(GetLastError()));
+                }
+                break;
             case deep_gemm::GemmType::Normal:
                 launchFuncNormal_ = reinterpret_cast<LaunchFuncNormal>(GetProcAddress((HMODULE) lib_, "launch"));
                 if (!launchFuncNormal_)
@@ -103,6 +110,13 @@ public:
             // Load launch function
             switch (gemm_type_)
             {
+            case deep_gemm::GemmType::PerTensorQuant:
+                launchFuncPerTensorGEMM_ = reinterpret_cast<LaunchFuncPerTensorGEMM>(dlsym(lib_, "launch"));
+                if (!launchFuncPerTensorGEMM_)
+                {
+                    throw std::runtime_error("Failed to find launch function: " + std::string(dlerror()));
+                }
+                break;
             case deep_gemm::GemmType::Normal:
                 launchFuncNormal_ = reinterpret_cast<LaunchFuncNormal>(dlsym(lib_, "launch"));
                 if (!launchFuncNormal_)
@@ -132,6 +146,7 @@ public:
         // Call the launch function with the provided arguments
         switch (gemm_type_)
         {
+        case deep_gemm::GemmType::PerTensorQuant: callPerTensorGEMM(std::forward<Args>(args)...); break;
         case deep_gemm::GemmType::Normal: callNormal(std::forward<Args>(args)...); break;
         case deep_gemm::GemmType::GroupedWithOffset: callGroupedWithOffset(std::forward<Args>(args)...); break;
         case deep_gemm::GemmType::StridedBatched: callStridedBatched(std::forward<Args>(args)...); break;
@@ -140,6 +155,8 @@ public:
     }
 
 private:
+    using LaunchFuncPerTensorGEMM
+        = void (*)(void*, int, void*, int, void*, int, float*, float*, uint32_t, int*, cudaStream_t, int, uint32_t);
     using LaunchFuncNormal
         = void (*)(void*, int, void*, int, void*, int, float*, float*, uint32_t, int*, cudaStream_t, int, uint32_t);
     using LaunchFuncGroupedWithOffset = void (*)(
@@ -151,9 +168,28 @@ private:
     std::string path_;
     void* lib_;
     deep_gemm::GemmType gemm_type_;
+    LaunchFuncPerTensorGEMM launchFuncPerTensorGEMM_;
     LaunchFuncNormal launchFuncNormal_;
     LaunchFuncGroupedWithOffset launchFuncGroupedWithOffset_;
     LaunchFuncStridedBatched launchFuncStridedBatched_;
+
+    // Helper method for Normal GEMM - checks for correct number of arguments
+    template <typename... ArgsT>
+    void callPerTensorGEMM(ArgsT&&... args)
+    {
+        constexpr size_t expected_args = 13;
+        constexpr size_t actual_args = sizeof...(args);
+
+        if constexpr (actual_args != expected_args)
+        {
+            throw std::invalid_argument(
+                "Normal GEMM requires exactly 13 arguments, but " + std::to_string(actual_args) + " were provided");
+        }
+        else
+        {
+            launchFuncPerTensorGEMM_(std::forward<ArgsT>(args)...);
+        }
+    }
 
     // Helper method for Normal GEMM - checks for correct number of arguments
     template <typename... ArgsT>
@@ -307,7 +343,11 @@ Runtime* RuntimeCache::operator[](std::string const& path)
         // Parse path to get gemm type
         std::string gemm_type_str = path.substr(path.find_last_of('_') + 1);
         deep_gemm::GemmType gemm_type;
-        if (gemm_type_str == "Normal")
+        if (gemm_type_str == "PerTensorQuant")
+        {
+            gemm_type = deep_gemm::GemmType::PerTensorQuant;
+        }
+        else if (gemm_type_str == "Normal")
         {
             gemm_type = deep_gemm::GemmType::Normal;
         }

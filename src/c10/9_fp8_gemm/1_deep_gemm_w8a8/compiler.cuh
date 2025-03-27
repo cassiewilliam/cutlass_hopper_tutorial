@@ -126,6 +126,11 @@ std::string Compiler::generateKernel(uint32_t const shape_n, uint32_t const shap
 
     switch (gemm_type)
     {
+    case deep_gemm::GemmType::PerTensorQuant:
+        code << "void* mat_a, int ld_a, void* mat_b, int ld_b, half* mat_d, int ld_d, float* scales_a,\n"
+             << "    float* scales_b, uint32_t shape_m, int* grouped_layout, cudaStream_t stream, int num_sms,\n"
+             << "    uint32_t smem_size)\n";
+        break;
     case deep_gemm::GemmType::Normal:
         code << "void* mat_a, int ld_a, void* mat_b, int ld_b, void* mat_d, int ld_d, float* scales_a,\n"
              << "    float* scales_b, uint32_t shape_m, int* grouped_layout, cudaStream_t stream, int num_sms,\n"
@@ -149,12 +154,6 @@ std::string Compiler::generateKernel(uint32_t const shape_n, uint32_t const shap
     code << "{\n";
     code << "    using namespace deep_gemm;\n\n";
 
-    if (std::getenv("TRTLLM_DG_JIT_DEBUG"))
-    {
-        code << "    printf(\"mat_a: %p, ld_a: %d, mat_b: %p, ld_b: %d, mat_d: %p, ld_d: %d, shape_m: %d, grouped_layout: %p \\n\", mat_a, ld_a, mat_b, ld_b, mat_d, ld_d, shape_m, grouped_layout);\n";
-        code << "    printf(\"scales_a: %p, scales_b: %p, stream: %p, num_sms: %d, smem_size: %u\\n\", scales_a, scales_b, stream, num_sms, smem_size);\n";
-    }
-
     // Template parameters
     code << "    // Templated args from JIT compilation\n";
     code << "    constexpr auto N = " << shape_n << ", K = " << shape_k << ";\n";
@@ -175,6 +174,12 @@ std::string Compiler::generateKernel(uint32_t const shape_n, uint32_t const shap
     code << "    // Launch kernel\n";
     switch (gemm_type)
     {
+    case deep_gemm::GemmType::PerTensorQuant:
+        code << "    GemmType::runGemm(mat_a, ld_a, mat_b, ld_b, mat_d, ld_d, scales_a, scales_b, shape_m, "
+                "grouped_layout, "
+                "stream,\n"
+                << "        num_sms, smem_size);\n";
+        break;
     case deep_gemm::GemmType::Normal:
         code << "    GemmType::runGemm(mat_a, ld_a, mat_b, ld_b, mat_d, ld_d, scales_a, scales_b, shape_m, "
                 "grouped_layout, "
@@ -380,7 +385,7 @@ std::filesystem::path Compiler::getCutlassIncludeDir()
     if (cutlassIncludeDir.empty())
     {
         // 获取当前文件所在目录
-        std::filesystem::path sourceDir = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "3rdparty/cutlass/include";
+        std::filesystem::path sourceDir = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path().parent_path() / "3rdparty/cutlass/include";
 
         // 设定 include 目录
         cutlassIncludeDir = sourceDir;

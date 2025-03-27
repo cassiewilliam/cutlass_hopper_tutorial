@@ -8,6 +8,38 @@
 namespace c108
 {
 
+/// Helper to initialize a block of device data
+template <typename Element, typename Layout>
+static bool initialize_tensor(
+  cutlass::TensorView<Element, Layout> view,
+  uint64_t seed) {
+
+  double scope_max, scope_min;
+  int bits_input = cutlass::sizeof_bits<Element>::value;
+  int bits_output = cutlass::sizeof_bits<Element>::value;
+
+  if (bits_input == 1) {
+    scope_max = 2;
+    scope_min = 0;
+  }
+  else if (bits_input <= 8) {
+    scope_max = 2;
+    scope_min = -2;
+  }
+  else if (bits_output == 16) {
+    scope_max = 5;
+    scope_min = -5;
+  }
+  else {
+    scope_max = 8;
+    scope_min = -8;
+  }
+  cutlass::reference::host::TensorFillRandomUniform(
+    view, seed, scope_max, scope_min, 0);
+
+  return true;
+}
+
 class DeepGemmRunner
 {
 public:
@@ -21,41 +53,17 @@ public:
 
     void tunning(int m, int n, int k, int num_groups, deep_gemm::GemmType type, cudaStream_t stream = 0);
 
-    void gemm(int          m,
-              int          n,
-              int          k,
-              void*        A,
-              float*       A_scales,
-              void*        B,
-              float*       B_scales,
-              void*        C,
-              cudaStream_t stream = 0);
-
-    void group_gemm_contiguous(int          m,
-                                int          n,
-                                int          k,
-                                float        alpha,
-                                void const*  A,
-                                int          lda,
-                                void const*  B,
-                                int          ldb,
-                                float        beta,
-                                void*        C,
-                                int          ldc,
-                                cudaStream_t stream = 0);
-
-    void group_gemm_masked(int          m,
-                            int          n,
-                            int          k,
-                            float        alpha,
-                            void const*  A,
-                            int          lda,
-                            void const*  B,
-                            int          ldb,
-                            float        beta,
-                            void*        C,
-                            int          ldc,
-                            cudaStream_t stream = 0);
+    void per_tensor_gmm(half*          res,
+                        int            m,
+                        int            n,
+                        int            k,
+                        float&         alpha,
+                        float&         beta,
+                        __nv_fp8_e4m3* input,
+                        __nv_fp8_e4m3* kernel,
+                        float*         input_scale,
+                        float*         kernel_scale,
+                        cudaStream_t   stream = 0);
 
 private:
 
@@ -81,7 +89,66 @@ void DeepGemmRunner::tunning(int m, int n, int k, int num_groups, deep_gemm::Gem
     auto config = deep_gemm::jit::get_best_gemm_config(m, n, k, num_groups, num_sms, is_grouped_contiguous);
 
     // construct gemm args
-    if (type == deep_gemm::GemmType::Normal)
+    if (type == deep_gemm::GemmType::PerTensorQuant)
+    {
+        std::string name = "gemm_fp8_fp8_fp16_per_tensor_quant_nt";
+
+        std::unordered_map<std::string, std::string> keys = {
+            {"N",                 std::to_string(n)},
+            {"K",                 std::to_string(k)},
+            {"BLOCK_M",           std::to_string(std::get<1>(config))},
+            {"BLOCK_N",           std::to_string(std::get<2>(config))},
+            {"NUM_STAGES",        std::to_string(std::get<3>(config))},
+            {"NUM_TMA_MULTICAST", std::to_string(std::get<4>(config))}
+        };
+        std::vector<std::unordered_map<std::string, std::string>> space = {};
+
+        deep_gemm::jit::JITTuner::BuildArgs build_args{
+            n,
+            k,
+            std::get<1>(config), // kBlockM
+            std::get<2>(config), // kBlockN
+            kBlockK,
+            num_groups,
+            std::get<3>(config), // kNumStages
+            std::get<4>(config), // kNumTmaMulticast
+            type
+        };
+
+        cutlass::HostTensor<cutlass::float_e4m3_t, cutlass::layout::RowMajor> tensor_A;
+        cutlass::HostTensor<cutlass::float_e4m3_t, cutlass::layout::ColumnMajor> tensor_B;
+        cutlass::HostTensor<cutlass::half_t, cutlass::layout::ColumnMajor> tensor_D;
+
+        // float alpha = 1.0f;
+        // float beta = 0.0f;
+        float scale_A = 2.2f;
+        float scale_B = 3.6f;
+
+        auto a_coord = cutlass::make_Coord(m, k);
+        auto b_coord = cutlass::make_Coord(k, n);
+        auto d_coord = cutlass::make_Coord(m, n);
+
+        tensor_A.resize(a_coord);
+        tensor_B.resize(b_coord);
+        tensor_D.resize(d_coord);
+
+        initialize_tensor(tensor_A.host_view(), 2024);
+        initialize_tensor(tensor_B.host_view(), 2025);
+        std::fill(tensor_D.host_data(), tensor_D.host_data() + tensor_D.capacity(), 0);
+        tensor_A.sync_device();
+        tensor_B.sync_device();
+        tensor_D.sync_device();
+
+        m_jittuner->compile_and_tune(name, keys, space, build_args,
+            (void *)(tensor_A.device_data()), k,
+            (void *)(tensor_B.device_data()), k,
+            (void *)(tensor_D.device_data()), n,
+            &scale_A, &scale_B, m, nullptr, stream,
+            std::get<0>(config), // num_sms,
+            std::get<5>(config)  // smem_size
+        );
+    }
+    else if (type == deep_gemm::GemmType::Normal)
     {
         std::string name = "gemm_fp8_fp16_bf16_nt";
 
@@ -173,19 +240,20 @@ void DeepGemmRunner::tunning(int m, int n, int k, int num_groups, deep_gemm::Gem
     }
 }
 
-void DeepGemmRunner::gemm(int          m,
-                          int          n,
-                          int          k,
-                          void*        A,
-                          float*       A_scales,
-                          void*        B,
-                          float*       B_scales,
-                          void*        C,
-                          cudaStream_t stream)
+void DeepGemmRunner::per_tensor_gmm(half*          res,
+                                    int            m,
+                                    int            n,
+                                    int            k,
+                                    float&         alpha,
+                                    float&         beta,
+                                    __nv_fp8_e4m3* input,
+                                    __nv_fp8_e4m3* kernel,
+                                    float*         input_scale,
+                                    float*         kernel_scale,
+                                    cudaStream_t   stream)
 {
 
-    std::string name = "gemm_fp8_fp16_bf16_nt";
-
+    std::string name = "gemm_fp8_fp8_fp16_per_tensor_quant_nt";
 
     int num_sms = deep_gemm::jit::get_num_sms();
 
@@ -209,10 +277,10 @@ void DeepGemmRunner::gemm(int          m,
 
     auto runtime = m_jittuner->get_best_runtime(name, keys);
 
-    uint32_t num_minimal_sms = std::get<0>(config);
+    int num_minimal_sms = std::get<0>(config);
     uint32_t smem_size = std::get<5>(config);
 
-    (*runtime)(A, k, B, k, C, n, A_scales, B_scales, m, nullptr, stream, num_minimal_sms, smem_size);
+    (*runtime)((void *)input, k, (void *)kernel, k, res, n, input_scale, kernel_scale, m, nullptr, stream, num_minimal_sms, smem_size);
 }
 
 

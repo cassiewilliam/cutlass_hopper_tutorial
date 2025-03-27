@@ -25,7 +25,7 @@ constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // M
 
 // D matrix configuration
 using         ElementD    = cutlass::half_t;
-using         LayoutD     = cutlass::layout::ColumnMajor;
+using         LayoutD     = cutlass::layout::RowMajor;
 constexpr int AlignmentD  = 128 / cutlass::sizeof_bits<ElementD>::value;
 
 using         ElementAmax  = float;

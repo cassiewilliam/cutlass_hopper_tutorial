@@ -22,4 +22,4 @@ else()
 endif()
 
 target_include_directories(c109_test_fp8_gemm PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
-target_link_libraries(c109_test_fp8_gemm PRIVATE nvidia::cutlass::cutlass)
+target_link_libraries(c109_test_fp8_gemm PRIVATE nvidia::cutlass::cutlass -lcudart -lcublas -lcublasLt -lcurand)
