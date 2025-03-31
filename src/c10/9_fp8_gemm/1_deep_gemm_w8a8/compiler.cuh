@@ -35,6 +35,7 @@
 #include "jit_utils.cuh"
 #include "runtime.cuh"
 #include "scheduler.cuh"
+#include "interleave_ffma.cuh"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -329,6 +330,11 @@ Runtime* Compiler::build(uint32_t const shape_n, uint32_t const shape_k, uint32_
     {
         throw std::runtime_error("Failed to compile " + tmpSrcPath.string());
     }
+
+    // Do interleave ffma process
+    bool enable_sass_opt = std::getenv("DG_USE_SASS_OPT");
+    if (enable_sass_opt)
+        interleave_ffma_process(tmpSoPath);
 
     // Copy the source and compiled files to the cache directory
     try

@@ -282,7 +282,7 @@ int run_gemm(Options<RasterOrderOptions> &options)
 
     std::cout << "  Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << 'x' << options.l << std::endl;
     std::cout << "  Rasterization: " << raster << " with a maximum CTA swizzle of " << options.swizzle << std::endl;
-    std::cout << "  Avg runtime: " << result.avg_runtime_ms << " ms" << std::endl;
+    std::cout << "  Avg runtime: " << result.avg_runtime_ms * 1000.0 << " us" << std::endl;
     std::cout << "  GFLOPS: " << result.gflops << std::endl;
   }
 
@@ -357,7 +357,7 @@ int run_deepgemm_fp8_gemm(Options<RasterOrderOptions> &options)
 
         std::cout << "  Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << 'x' << options.l << std::endl;
         std::cout << "  Rasterization: " << raster << " with a maximum CTA swizzle of " << options.swizzle << std::endl;
-        std::cout << "  Avg runtime: " << result.avg_runtime_ms << " ms" << std::endl;
+        std::cout << "  Avg runtime: " << result.avg_runtime_ms * 1000.0 << " us" << std::endl;
         std::cout << "  GFLOPS: " << result.gflops << std::endl;
     }
 
