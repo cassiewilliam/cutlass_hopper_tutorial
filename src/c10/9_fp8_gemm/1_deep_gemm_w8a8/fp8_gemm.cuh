@@ -726,13 +726,12 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
 
         // NOTES: use `__shfl_sync` to encourage NVCC to use unified registers
         auto const math_wg_idx = __shfl_sync(0xffffffff, threadIdx.x / kNumMathThreadsPerGroup, 0);
-        auto const r_0 = warp_idx * 16 + lane_idx / 4, r_1 = r_0 + 8;
 
         // Persistently schedule over blocks
         while (scheduler.get_next_block(m_block_idx, n_block_idx))
         {
-            // Accumulation for WGMMA or CUDA promotion
-            float accum[WGMMA::kNumAccum], final_accum[WGMMA::kNumAccum] = {0};
+            // Accumulation for WGMMA
+            float accum[WGMMA::kNumAccum] = {0};
 
             // Empty barrier arrival
             auto empty_barrier_arrive = [&](int s)
@@ -774,7 +773,8 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
                             auto desc_a
                                 = make_smem_desc(smem_a[s] + math_wg_idx * WGMMA::M * BLOCK_K + k * WGMMA::K, 1);
                             auto desc_b = make_smem_desc(smem_b[s] + k * WGMMA::K, 1);
-                            WGMMA::wgmma(desc_a, desc_b, accum, k);
+                            // 直接累加到accum
+                            WGMMA::wgmma(desc_a, desc_b, accum, true);
                         }
                         warpgroup_commit_batch();
                         
@@ -786,15 +786,6 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
 
                         // Notify barrier arrival
                         empty_barrier_arrive(s);
-
-                        #pragma unroll
-                        for (int i = 0; i < WGMMA::kNumAccum / 4; ++i)
-                        {
-                            final_accum[i * 4 + 0] += scale * accum[i * 4 + 0];
-                            final_accum[i * 4 + 1] += scale * accum[i * 4 + 1];
-                            final_accum[i * 4 + 2] += scale * accum[i * 4 + 2];
-                            final_accum[i * 4 + 3] += scale * accum[i * 4 + 3];
-                        }
                     }
 
                     // Wait unaligned cases
@@ -813,17 +804,17 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
             for (auto i = 0; i < WGMMA::kNumAccum / 8; ++i)
             {
                 SM90_U32x4_STSM_N<half2>::copy(
-                    __float22half2_rn({final_accum[i * 8 + 0], final_accum[i * 8 + 1]}),
-                    __float22half2_rn({final_accum[i * 8 + 2], final_accum[i * 8 + 3]}),
-                    __float22half2_rn({final_accum[i * 8 + 4], final_accum[i * 8 + 5]}),
-                    __float22half2_rn({final_accum[i * 8 + 6], final_accum[i * 8 + 7]}),
+                    __float22half2_rn({accum[i * 8 + 0] * scale, accum[i * 8 + 1] * scale}),
+                    __float22half2_rn({accum[i * 8 + 2] * scale, accum[i * 8 + 3] * scale}),
+                    __float22half2_rn({accum[i * 8 + 4] * scale, accum[i * 8 + 5] * scale}),
+                    __float22half2_rn({accum[i * 8 + 6] * scale, accum[i * 8 + 7] * scale}),
                     smem_d + (warp_idx * 16 + lane_idx % 16) * BLOCK_N + i * 16 + 8 * (lane_idx / 16));
             }
             if constexpr (WGMMA::kNumAccum % 8 != 0)
             {
                 SM90_U32x2_STSM_N<half2>::copy(
-                    __float22half2_rn({final_accum[WGMMA::kNumAccum / 8 * 8 + 0], final_accum[WGMMA::kNumAccum / 8 * 8 + 1]}),
-                    __float22half2_rn({final_accum[WGMMA::kNumAccum / 8 * 8 + 2], final_accum[WGMMA::kNumAccum / 8 * 8 + 3]}),
+                    __float22half2_rn({accum[WGMMA::kNumAccum / 8 * 8 + 0] * scale, accum[WGMMA::kNumAccum / 8 * 8 + 1] * scale}),
+                    __float22half2_rn({accum[WGMMA::kNumAccum / 8 * 8 + 2] * scale, accum[WGMMA::kNumAccum / 8 * 8 + 3] * scale}),
                     smem_d + (warp_idx * 16 + lane_idx % 16) * BLOCK_N + WGMMA::kNumAccum / 8 * 16);
             }
 
