@@ -405,7 +405,7 @@ void gemm_nt(int          m,
                                                                          decltype(tiled_mma),
                                                                          decltype(alpha),
                                                                          decltype(beta)>);
-    
+
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(
         kernel_ptr,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -425,7 +425,7 @@ void gemm_nt(int          m,
                                                                tiled_mma,
                                                                alpha,
                                                                beta);
-    
+
     CUTE_CHECK_LAST();
 
     if (status != cutlass::Status::kSuccess) {

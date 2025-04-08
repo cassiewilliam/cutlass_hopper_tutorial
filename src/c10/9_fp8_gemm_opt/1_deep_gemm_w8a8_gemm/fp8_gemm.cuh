@@ -766,7 +766,7 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
                         for (int i = 0; i < WGMMA::kNumAccum; ++i)
                             warpgroup_fence_operand(accum[i]);
                         warpgroup_arrive();
-                        
+
                         #pragma unroll
                         for (int k = 0; k < BLOCK_K / WGMMA::K; ++k)
                         {
@@ -777,7 +777,7 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
                             WGMMA::wgmma(desc_a, desc_b, accum, true);
                         }
                         warpgroup_commit_batch();
-                        
+
                         #pragma unroll
                         for (int i = 0; i < WGMMA::kNumAccum; ++i)
                             warpgroup_fence_operand(accum[i]);
