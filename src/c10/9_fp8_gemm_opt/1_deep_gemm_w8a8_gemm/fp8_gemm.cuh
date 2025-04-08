@@ -44,6 +44,75 @@
 namespace deep_gemm
 {
 
+template<int SequenceDepth_, int SequenceLength_>
+class OrderedSeqBarrier
+{
+public:
+    static constexpr int SequenceDepth = SequenceDepth_;
+    static constexpr int SequenceLength = SequenceLength_;
+    using Barrier = cutlass::arch::ClusterBarrier;
+
+    struct Params {
+      uint32_t group_id;
+      uint32_t group_size;
+      int initializing_warp = 0; 
+    };
+  
+  private:
+    // In future this Params object can be replaced easily with a CG object
+    Params params_;
+    Barrier *barrier_ptr_;
+    cutlass::PipelineState<SequenceDepth> stage_;
+  
+    static constexpr int Depth = SequenceDepth;
+    static constexpr int Length = SequenceLength;
+  
+  public:
+    OrderedSeqBarrier() = delete;
+    OrderedSeqBarrier(const OrderedSeqBarrier&) = delete;
+    OrderedSeqBarrier(OrderedSeqBarrier&&) = delete;
+    OrderedSeqBarrier& operator=(const OrderedSeqBarrier&) = delete;
+    OrderedSeqBarrier& operator=(OrderedSeqBarrier&&) = delete;
+    ~OrderedSeqBarrier() = default;
+  
+    CUTLASS_DEVICE
+    OrderedSeqBarrier(Barrier* barrier_ptr, Params const& params)
+        : params_(params)
+        , barrier_ptr_(barrier_ptr)
+        , stage_({0, params.group_id == 0, 0}) // Group 0 - starts with an opposite phase
+    {
+
+    }
+  
+    // Wait on a stage to be unlocked
+    CUTLASS_DEVICE void wait()
+    {
+      get_barrier_for_current_stage(params_.group_id).wait(stage_.phase());
+    }
+  
+    // Signal completion of Stage and move to the next stage
+    // (group_id) signals to (group_id+1)
+    CUTLASS_DEVICE void arrive()
+    {
+      int signalling_id = (params_.group_id + 1) % Length;
+      get_barrier_for_current_stage(signalling_id).arrive();
+      ++stage_;
+    }
+  
+    CUTLASS_DEVICE
+    void advance() {
+      ++stage_;
+    }
+
+private:
+  
+    CUTLASS_DEVICE Barrier& get_barrier_for_current_stage(int group_id)
+    {
+      return barrier_ptr_[stage_.index() * Length + group_id];
+    }
+
+};
+
 enum class Layout
 {
     RowMajor,
@@ -554,6 +623,13 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
     // Barrier (in SMEM): 阶段位 phase bit value (0/1) + 到达计数 arrival count
     using Barrier = cutlass::arch::ClusterTransactionBarrier;
 
+    // Order Sequence barrier with two stages: one for Mainloop and one for Epilogue
+    static constexpr uint32_t kStagesPerMathWarpGroup = 2;
+    // 当前有多少个Math的Warp Group，最少为两个，两个可以进行调度
+    static constexpr uint32_t kNumMathWarpGroups = kNumMathThreads / 128;
+
+    using MathWarpGroupOrderBarrier = deep_gemm::OrderedSeqBarrier<StagesPerMathWarpGroup, kNumMathWarpGroups>;
+
     // NOTE: 输出所需要的Shared Memory，那么可以认为per-CTA计算一个BLOCK_M * BLOCK_N这么大小的块
     static constexpr uint32_t SMEM_D_SIZE = BLOCK_M * BLOCK_N * sizeof(half);
 
@@ -590,6 +666,8 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
     // TMA Barrier for both divisible and non-divisible cases
     Barrier* full_barriers[kNumStages];
     Barrier* empty_barriers[kNumStages];
+    // 定义math warp group order barriers 用于PingPong操作
+    Barrier* math_wg_order_barriers[StagesPerMathWarpGroup * kNumMathWarpGroups];
 
     // Fill shared memory pointers
     #pragma unroll
@@ -610,6 +688,13 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
         empty_barriers[i] = barrier_start_ptr + kNumStages + i;
     }
 
+    // For PingPong Barriers
+    #pragma unroll
+    for (int i = 0; i < StagesPerMathWarpGroup * kNumMathWarpGroups; ++i)
+    {
+        math_wg_order_barriers[i] = barrier_start_ptr + kNumStages * 2 + i;
+    }
+
     // Initialize barriers
     DG_STATIC_ASSERT(kNumTMAMulticast <= 32, "Too many TMA multicast");
     if (threadIdx.x == kNumMathThreads)
@@ -621,6 +706,15 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
             empty_barriers[i]->init(kNumTMAMulticast * kNumMathThreads / 32);
         }
 
+        #pragma unroll
+        for (int s = 0; s < StagesPerMathWarpGroup; ++s)
+        {
+            for (int g = 0; g < kNumMathWarpGroups; ++g)
+            {
+                math_wg_order_barriers[s * kNumMathWarpGroups + g]->init(NumThreadsPerWarpGroup);
+            }
+        }
+
         // Make initialized barrier visible in async proxy
         cutlass::arch::fence_view_async_shared();
         (kNumTMAMulticast > 1) ? cutlass::arch::fence_barrier_init() : void();
@@ -628,6 +722,12 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
 
     // Synchronize all threads to make barrier visible in normal memory model
     (kNumTMAMulticast > 1) ? cute::cluster_sync() : __syncthreads();
+
+    // Initialize PingPong Barriers
+    typename MathWarpGroupOrderBarrier::Params params_math_wg_order_barrier;
+    params_math_wg_order_barrier.group_id = canonical_warp_group_idx();
+    params_math_wg_order_barrier.group_size = kNumMathThreadsPerGroup;
+    MathWarpGroupOrderBarrier math_wg_order_barriers(math_wg_order_barriers, params_math_wg_order_barrier);
 
     // For pipeline unrolling
     struct DivisibleK
@@ -746,6 +846,9 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
                 }
             };
 
+            // Order two Math WG's MMA one after the other, helps hide Epilogue
+            math_wg_order_barrier.wait();
+
             // Launch MMAs
             launch_k_iterations(
                 [&](int k_iter, auto type)
@@ -795,7 +898,15 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
                         full_barriers[s]->wait((scheduler.current_iter * kNumIterations + k_iter) & 1);
                         empty_barrier_arrive(s);
                     }
-                });
+                }
+            );
+
+            // Cue for next Math WG's MMA to start
+            math_wg_order_barrier.arrive();
+
+
+            // Order two Math WG's Epilogue one after the other
+            math_wg_order_barrier.wait();
 
             // Write back to shared memory using STSM
             DG_STATIC_ASSERT(WGMMA::kNumAccum % 4 == 0, "Invalid STSM x2 vectorization");
@@ -829,6 +940,8 @@ fp8_pef_tensor_quant_gemm_kernel(half*                               gmem_d,
                 cute::tma_store_wait<0>();
             }
 
+            // Cue for next Math WG's Epilogue to start
+            math_wg_order_barrier.arrive();
             __syncwarp();
         }
     }

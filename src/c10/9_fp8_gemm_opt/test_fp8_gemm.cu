@@ -1,7 +1,7 @@
 
 #include "include/fp8_gemm_utils.h"
-#include "src/c10/9_fp8_gemm/0_fp8_warp_specialization_gemm/fp8_warp_specialization_gemm.cuh"
-#include "src/c10/9_fp8_gemm/1_deep_gemm_w8a8/deep_gemm_runner.h"
+#include "src/c10/9_fp8_gemm_opt/0_fp8_warp_specialization_gemm/fp8_warp_specialization_gemm.cuh"
+#include "src/c10/9_fp8_gemm_opt/1_deep_gemm_w8a8_gemm/deep_gemm_runner.h"
 
 /// Initialization
 
