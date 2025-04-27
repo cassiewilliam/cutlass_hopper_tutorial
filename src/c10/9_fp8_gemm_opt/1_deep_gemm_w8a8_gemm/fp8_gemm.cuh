@@ -48,6 +48,7 @@ template<int SequenceDepth_, int SequenceLength_>
 class OrderedSeqBarrier
 {
 public:
+
     static constexpr int SequenceDepth = SequenceDepth_;
     static constexpr int SequenceLength = SequenceLength_;
     using Barrier = cutlass::arch::ClusterBarrier;
@@ -57,17 +58,19 @@ public:
       uint32_t group_size;
       int initializing_warp = 0; 
     };
-  
-  private:
+
+private:
+
     // In future this Params object can be replaced easily with a CG object
     Params params_;
     Barrier *barrier_ptr_;
     cutlass::PipelineState<SequenceDepth> stage_;
-  
+
     static constexpr int Depth = SequenceDepth;
     static constexpr int Length = SequenceLength;
-  
+
   public:
+
     OrderedSeqBarrier() = delete;
     OrderedSeqBarrier(const OrderedSeqBarrier&) = delete;
     OrderedSeqBarrier(OrderedSeqBarrier&&) = delete;
@@ -83,13 +86,13 @@ public:
     {
 
     }
-  
+
     // Wait on a stage to be unlocked
     CUTLASS_DEVICE void wait()
     {
       get_barrier_for_current_stage(params_.group_id).wait(stage_.phase());
     }
-  
+
     // Signal completion of Stage and move to the next stage
     // (group_id) signals to (group_id+1)
     CUTLASS_DEVICE void arrive()
@@ -98,14 +101,13 @@ public:
       get_barrier_for_current_stage(signalling_id).arrive();
       ++stage_;
     }
-  
-    CUTLASS_DEVICE
-    void advance() {
+
+    CUTLASS_DEVICE void advance() {
       ++stage_;
     }
 
 private:
-  
+
     CUTLASS_DEVICE Barrier& get_barrier_for_current_stage(int group_id)
     {
       return barrier_ptr_[stage_.index() * Length + group_id];
