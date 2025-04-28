@@ -31,9 +31,47 @@
 
 
 /*! \file
-    \brief 
-    Hopper Mixed-input Grouped GEMM example using CUTLASS 3 APIs for NVIDIA Hopper architecture. 
-    See 55_hopper_int4_fp8_gemm.cu for more details about W4A8 GEMMs with lookup table.
+    \brief
+    基于NVIDIA Hopper架构的CUTLASS 3.0 API多数据类型GEMM示例：INT4与FP8的混合精度计算
+    本示例演示了如何执行INT4与FP8的混合精度矩阵乘法（GEMM），并在反量化过程中对INT4权重进行缩放。
+    该实现采用查找表机制替代INT4与FP8的直接乘法运算。要启用此方法，需在集合参数中使用cutlass::Array<ElementScale, 8>作为缩放因子类型。
+    该算法要求对INT4权重和缩放因子进行特定的编码预处理。
+    具体实现细节请参考头文件fp8_packed_scale.hpp中的辅助函数unify_quant_encoding[统一量化编码]和initialize_packed_scale[初始化打包缩放因子]。
+    
+    核心要点包括：
+
+    INT4权重的正值编码需保持与负值相同的位模式（符号位除外）
+    每个缩放因子对应8个预计算值（-8×scale至-1×scale），打包形成cutlass::Array<ElementScale, 8>结构
+    寄存器文件设计约束要求较窄数据类型（如INT4）必须通过寄存器传输。
+    当较窄类型作为操作数B时，系统会在主循环中隐式交换A/B的操作顺序。
+    但此隐式交换机制不支持TMA（Tensor Memory Accelerator）后处理，因此在设计后处理逻辑时需特别注意，如本示例所示。
+    为提高性能，本示例显式交换A/B操作数以支持TMA后处理。
+    通过优化窄数据类型张量的内存布局，可使同一线程读取的寄存器元素在全局内存和共享内存中保持连续，从而提升共享内存加载的向量化程度，减少关键路径上的额外指令。
+    
+    例如：
+
+    当使用FP8数据类型执行MMA（Matrix Multiply Accumulate）时，每个线程读取的4组4元素在逻辑上保持行连续
+    若INT4张量在K维度主序排列，每次只能加载16位数据，导致共享内存吞吐量利用率不足
+    通过离线重排序使线程读取的16元素在内存中连续，单次64位加载即可完成（适用于静态量化张量如推理阶段的神经网络权重）
+    缩放因子维度要求：scale_k = ceil_div(problem_k, group_size)[向上取整分组尺寸]。
+    缩放张量必须保持MN主序布局：若对A进行缩放，则采用列主序；若对B缩放则采用行主序。
+    当前实现仅支持分组缩放，但通过设置组尺寸等于GEMM问题尺寸K可实现逐列缩放。
+
+    技术限制：
+
+    仅支持INT4与{FP8, INT8, UINT8}的混合计算，缩放因子类型需与MMA类型一致，不支持零点模式
+    INT4权重和缩放因子需满足特定编码要求
+    缩放张量必须保持MN主序布局
+    缩放张量需保持相同布局和组尺寸
+    组尺寸必须≥tile形状k
+    当窄类型作为B操作数时，由于隐式交换机制与TMA后处理不兼容，当前暂不支持TMA后处理（示例通过显式交换解决）
+    优化建议：
+    采用较小的tile尺寸以降低寄存器压力（RS GEMM普遍存在高寄存器占用问题）
+    运行示例：
+    执行混合精度批处理GEMM（批尺寸2），将B转换为A的类型：
+    $ ./examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_fp8_gemm --m=2048 --n=2048 --k=2048 --l=2 --mode=0
+    执行混合精度GEMM并对B进行预缩放（组尺寸等于K维度）：
+    $ ./examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_fp8_gemm --m=4096 --n=5120 --k=8192 --g=8192 --mode=1
 
     Limitations:
       1) Only support row-wise scaling. Zero-points and block-wise scaling is currently not supported.
@@ -565,6 +603,30 @@ typename Gemm::Arguments args_from_options(Options const& options, bool host_pro
     fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
     fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
   }
+
+  /*
+  struct Arguments {
+    GemmUniversalMode mode{};
+    ProblemShape problem_shape{};
+    MainloopArguments mainloop{};
+    EpilogueArguments epilogue{};
+    KernelHardwareInfo hw_info{};
+    TileSchedulerArguments scheduler{};
+  };
+
+  // MainloopArguments
+  struct Arguments {
+    ElementA const** ptr_A;
+    StrideA dA;
+    ElementB const** ptr_B;
+    StrideB dB;
+    ElementScale const** ptr_S = nullptr;
+    NonVoidStrideScale const* dS{};
+    int chunk_size = 0;
+    ElementZero const** ptr_Z = nullptr;
+  };
+  */
+
   arguments = Args {
     cutlass::gemm::GemmUniversalMode::kGrouped,
     {options.groups, problem_sizes.get(), nullptr},

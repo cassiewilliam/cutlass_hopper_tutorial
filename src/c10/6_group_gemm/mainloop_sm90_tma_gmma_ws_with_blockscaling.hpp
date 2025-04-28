@@ -246,25 +246,32 @@ public:
   static_assert(size<1>(SmemLayoutAtomScale{}) == 1, "size<1>(SmemLayoutAtomScale) must be 1.");
 
 private:
-  static constexpr ConversionMode 
-  get_conversion_mode() {
-    if constexpr (cute::is_void_v<ElementScale>) {
+
+  static constexpr ConversionMode get_conversion_mode()
+  {
+    if constexpr (cute::is_void_v<ElementScale>)
+    {
       return ConversionMode::DirectConvert;
-    } 
-    else if constexpr (cute::is_void_v<ElementZero>) {
+    }
+    else if constexpr (cute::is_void_v<ElementZero>)
+    {
       return ConversionMode::ConvertAndScale;
     }
-    else {
+    else
+    {
       return ConversionMode::ConvertAndScaleWithZero;
     }
-  }  
+  }
 
 public:
+
   static constexpr ConversionMode KernelConversionMode = get_conversion_mode();
   static constexpr bool ModeHasScales = KernelConversionMode == ConversionMode::ConvertAndScale ||
                                         KernelConversionMode == ConversionMode::ConvertAndScaleWithZero;
+  
   static constexpr bool UseScaleLookupTable = KernelConversionMode == ConversionMode::ConvertAndScale &&
                                               cutlass::detail::is_Array_v<ElementScale>;
+
   static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(SmemLayoutA{}); 
   static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(SmemLayoutB{});
   static constexpr size_t SmemAlignmentScale = cute::max(SmemAlignmentA, SmemAlignmentB);
@@ -491,11 +498,13 @@ public:
       };
     };
 
-    if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
+    if constexpr (KernelConversionMode == ConversionMode::DirectConvert) 
+    {
       return SwapAB ? args_setup(args.ptr_B, args.ptr_A)
                     : args_setup(args.ptr_A, args.ptr_B);
     }
-    else if constexpr (ModeHasScales) {
+    else if constexpr (ModeHasScales)
+    {
       auto scale_k = ceil_div(init_K, args.chunk_size);
       ElementScale const* ptr_S = reinterpret_cast<ElementScale const*>(args.ptr_S);
       StrideScale dS{};
@@ -507,11 +516,13 @@ public:
           ScaleTileShape{},
           _1{}); // mcast along N mode for this M load, if any
 
-      if constexpr(KernelConversionMode == ConversionMode::ConvertAndScale) {
+      if constexpr(KernelConversionMode == ConversionMode::ConvertAndScale)
+      {
         return SwapAB ? args_setup(args.ptr_B, args.ptr_A, scale_k, args.chunk_size, (args.chunk_size + size<2>(TileShape{}) - 1) / size<2>(TileShape{}))
                       : args_setup(args.ptr_A, args.ptr_B, scale_k, args.chunk_size, (args.chunk_size + size<2>(TileShape{}) - 1) / size<2>(TileShape{}));
       }
-      else if constexpr(KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
+      else if constexpr(KernelConversionMode == ConversionMode::ConvertAndScaleWithZero)
+      {
         ElementZero const* ptr_Z = reinterpret_cast<ElementZero const*>(args.ptr_Z);
         Tensor tensor_zero = make_tensor(detail::get_logical_ptr(ptr_Z), make_layout(make_shape(init_M,scale_k,mock_L), dS));
         tma_load_zero = make_tma_copy(
@@ -528,7 +539,8 @@ public:
         static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in to_underlying_arguments.");
       }
     } 
-    else {
+    else
+    {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>, "Conversion mode not handled in to_underlying_arguments.");
     } 
   }
