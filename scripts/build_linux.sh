@@ -7,7 +7,7 @@ if [ "$1" == "make" ]; then
 builder=""
 fi
 
-SM="90"
+SM="90a"
 
 cmake ${builder} .. \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
