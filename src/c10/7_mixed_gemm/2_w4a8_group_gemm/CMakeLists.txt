@@ -9,7 +9,7 @@ include_directories(
 )
 remove_definitions(-DTORCH_CUDA=1)
 
-add_executable(c1060_test_hopper_mixed_input_groupgemm hopper_int4_fp8_group_gemm.cu)
+add_executable(c1072_test_hopper_mixed_input_groupgemm hopper_int4_fp8_group_gemm.cu)
 
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
     set_source_files_properties(
@@ -21,5 +21,5 @@ else()
     message(FATAL_ERROR "cutlass hopper_int4_fp8_group_gemm kernel required sm 90a")
 endif()
 
-target_include_directories(c1060_test_hopper_mixed_input_groupgemm PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
-target_link_libraries(c1060_test_hopper_mixed_input_groupgemm PRIVATE nvidia::cutlass::cutlass)
+target_include_directories(c1072_test_hopper_mixed_input_groupgemm PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
+target_link_libraries(c1072_test_hopper_mixed_input_groupgemm PRIVATE nvidia::cutlass::cutlass)
