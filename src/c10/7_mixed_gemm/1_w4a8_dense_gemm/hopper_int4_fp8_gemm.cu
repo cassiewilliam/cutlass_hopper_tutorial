@@ -118,7 +118,6 @@
 #include "cutlass/epilogue/collective/default_epilogue.hpp"
 #include "cutlass/epilogue/thread/linear_combination.h"
 #include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/tensor_ref.h"
@@ -134,9 +133,11 @@
 
 #include "builder.hpp"
 #include "dispatch_policy_extra.hpp"
+#include "gemm_universal_adapter_x.h"
 #include "helper.h"
 #include "mainloop_sm90_tma_gmma_ws_x.hpp"
 #include "mixed_dtype_utils.hpp"
+#include "sm90_epilogue_tma_warpspecialized_x.hpp"
 #include "sm90_gemm_tma_warpspecialized_cooperative_x.hpp"
 
 using namespace cute;
@@ -211,6 +212,9 @@ using KernelSchedule = cutlass::gemm::
 using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
 using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 
+// TODO(Alan): support later
+// using FusionOperation = cutlass::epilogue::fusion::ScaledAcc<ElementD, ElementCompute>;
+
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     cutlass::arch::Sm90,
     cutlass::arch::OpClassTensorOp,
@@ -277,8 +281,8 @@ using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
     CollectiveMainloopShuffled,
     CollectiveEpilogue>;
 
-using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-using GemmShuffled  = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelShuffled>;
+using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapterX<GemmKernelScaleOnly>;
+using GemmShuffled  = cutlass::gemm::device::GemmUniversalAdapterX<GemmKernelShuffled>;
 
 using StrideC = typename GemmKernelScaleOnly::StrideC;
 using StrideD = typename GemmKernelScaleOnly::StrideD;
@@ -468,6 +472,15 @@ typename Gemm::Arguments args_from_options(Options const& options)
             return stride_B;
         }
     }();
+
+    // Arguments
+    // GemmUniversalMode      mode{};
+    // ProblemShape           problem_shape{};
+    // MainloopArguments      mainloop{};
+    // EpilogueArguments      epilogue{};
+    // KernelHardwareInfo     hw_info{};
+    // TileSchedulerArguments scheduler{};
+
     return Args{cutlass::gemm::GemmUniversalMode::kGemm,
                 {options.n, options.m, options.k, options.l},
                 {block_B_modified.get(),

@@ -1,4 +1,6 @@
+#pragma once
 
+#include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
 #include "dispatch_policy_extra.hpp"
@@ -270,3 +272,187 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 }   // namespace cutlass::gemm::collective
+
+
+namespace cutlass::epilogue::collective {
+
+namespace detail {
+
+// Returns the parameterized dispatch policy for the TMA epilogue
+template<class TileShapeMNK, class EpilogueTileMN, class ElementC, class ElementD, class Schedule>
+constexpr auto sm90_get_tma_dispatch_policy_x()
+{
+    using namespace cute;
+
+    constexpr int EpiTiles     = size(shape_div(take<0, 2>(TileShapeMNK{}), EpilogueTileMN{}));
+    constexpr int FragmentSize = size(EpilogueTileMN{}) /
+                                 (detail::sm90_is_cooperative_v<Schedule> ? 256 : 128);
+    // 8b residuals load fast and consume little smem, so the perf cost of waiting on stores to
+    // finish outweighs the cost of extra allocation
+    constexpr bool ReuseSmem = (sizeof_bits_v<ElementC> == sizeof_bits_v<ElementD>) &&
+                               (sizeof_bits_v<ElementD> > 8);
+    // TMA store delay performs worse with residual loads and compilicates tensormap updates for
+    // Ptr-Array GEMMs
+    constexpr bool DelayTmaStore = is_void_v<ElementC> &&
+                                   !detail::sm90_is_ptr_array_tma_v<Schedule>;
+    constexpr int StagesD = cute::min(EpiTiles, 2);
+    constexpr int StagesC = ReuseSmem ? cute::max(cute::min(EpiTiles, 4), StagesD + 1)
+                                      : cute::min(EpiTiles, 4);
+
+
+    return Sm90TmaWarpSpecializedX<StagesC, StagesD, FragmentSize, ReuseSmem, DelayTmaStore>{};
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+// Helper for building TMA warp-specialized collective epilogues, specialized by
+// the fusion operation performed and the dispatch policy to use.
+template<class TileShape_MNK,
+         class EpilogueTile_MN,
+         class ElementAccumulator,
+         class ElementCompute,
+         class ElementC_,
+         class GmemLayoutTagC_,
+         int AlignmentC,
+         class ElementD_,
+         class GmemLayoutTagD,
+         int AlignmentD,
+         class FusionOpOrCallbacks,
+         class DispatchPolicy>
+struct Sm90TmaBuilderImplX
+{
+    // Passing void D disables destination store + smem allocation
+    using ElementD = cute::conditional_t<cute::is_void_v<ElementD_>,
+                                         fusion::get_element_aux_t<FusionOpOrCallbacks>,
+                                         ElementD_>;
+
+    // Passing void C disables source load + smem allocation
+    using ElementC = cute::conditional_t<cute::is_void_v<ElementC_>,
+                                         ElementD,
+                                         ElementC_>;   // prevents void ref breakages
+
+    using GmemLayoutTagC = cute::
+        conditional_t<cute::is_void_v<ElementC_>, GmemLayoutTagD, GmemLayoutTagC_>;
+
+    using GmemStrideTypeC = cutlass::detail::TagToStrideC_t<GmemLayoutTagC>;
+    using GmemStrideTypeD = cutlass::detail::TagToStrideC_t<GmemLayoutTagD>;
+
+    using UnderlyingGmemStrideTypeC = cute::remove_pointer_t<GmemStrideTypeC>;
+    using UnderlyingGmemStrideTypeD = cute::remove_pointer_t<GmemStrideTypeD>;
+
+    using CopyOpS2G = cute::conditional_t<detail::is_im2col_mode<GmemLayoutTagD>,
+                                          SM90_TMA_STORE_IM2COL,
+                                          SM90_TMA_STORE>;
+    using CopyOpG2S = cute::
+        conditional_t<detail::is_im2col_mode<GmemLayoutTagC>, SM90_TMA_LOAD_IM2COL, SM90_TMA_LOAD>;
+
+    // Get the smallest tiled copy we can use to retile the accumulators
+    using CopyAtomC = Copy_Atom<SM90_U32x4_STSM_N, cutlass::half_t>;
+    // Get register to register tiled copy that happen before shared memory store.
+    // Apply void as no register transform op needed currently.
+    using CopyOpR2R = void;
+
+    // TMA builder allows for passing callbacks directly, which is either a fusion::FusionCallbacks
+    // instance or a direct visitor implementation, e.g. fusion::Sm90LinearCombination
+    using FusionCallbacks = typename CallbacksBuilder<DispatchPolicy,
+                                                      FusionOpOrCallbacks,
+                                                      TileShape_MNK,
+                                                      EpilogueTile_MN,
+                                                      ElementAccumulator>::Callbacks;
+
+    using CollectiveOp = cutlass::epilogue::collective::CollectiveEpilogue<
+        DispatchPolicy,
+        TileShape_MNK,
+        EpilogueTile_MN,
+        ElementC_,   // Need to pass void through to expose via GemmUniversal
+        GmemStrideTypeC,
+        ElementD_,
+        GmemStrideTypeD,
+        FusionCallbacks,
+        CopyOpG2S,
+        decltype(detail::sm90_get_epilogue_smem_swizzle_layout_atom<UnderlyingGmemStrideTypeC,
+                                                                    ElementC,
+                                                                    EpilogueTile_MN>()),
+        decltype(detail::sm90_get_smem_load_op_for_source<UnderlyingGmemStrideTypeC, ElementC>()),
+        CopyOpS2G,
+        decltype(detail::sm90_get_epilogue_smem_swizzle_layout_atom<UnderlyingGmemStrideTypeD,
+                                                                    ElementD,
+                                                                    EpilogueTile_MN>()),
+        decltype(detail::sm90_get_smem_store_op_for_accumulator<UnderlyingGmemStrideTypeD,
+                                                                ElementD>()),
+        CopyAtomC,
+        CopyOpR2R>;
+};
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+}   // namespace detail
+
+// Tma warp-specialized builder
+template<class OpClass,
+         class TileShape_MNK,
+         class ClusterShape_MNK,
+         class EpilogueTileType,
+         class ElementAccumulator,
+         class ElementCompute,
+         class ElementC,
+         class GmemLayoutTagC,
+         int AlignmentC,
+         class ElementD_,
+         class GmemLayoutTagD,
+         int AlignmentD,
+         class Schedule,
+         class FusionOperation>
+struct CollectiveBuilder<
+    arch::Sm90,
+    OpClass,
+    TileShape_MNK,
+    ClusterShape_MNK,
+    EpilogueTileType,
+    ElementAccumulator,
+    ElementCompute,
+    ElementC,
+    GmemLayoutTagC,
+    AlignmentC,
+    ElementD_,
+    GmemLayoutTagD,
+    AlignmentD,
+    Schedule,
+    FusionOperation,
+    cute::enable_if_t<cute::is_same_v<Schedule, TmaWarpSpecializedCooperativeX> ||
+                      detail::sm90_is_ptr_array_tma_v<Schedule>>>
+{
+private:
+    using ElementD = cute::conditional_t<cute::is_void_v<ElementD_>,
+                                         fusion::get_element_aux_t<FusionOperation>,
+                                         ElementD_>;
+
+    using EpilogueTile_MN = decltype(detail::sm90_compute_tile_shape_or_override<ElementD,
+                                                                                 EpilogueTileType,
+                                                                                 Schedule,
+                                                                                 TileShape_MNK>());
+
+    using DispatchPolicy = decltype(detail::sm90_get_tma_dispatch_policy_x<TileShape_MNK,
+                                                                           EpilogueTile_MN,
+                                                                           ElementC,
+                                                                           ElementD,
+                                                                           Schedule>());
+
+public:
+    using CollectiveOp = typename detail::Sm90TmaBuilderImplX<TileShape_MNK,
+                                                              EpilogueTile_MN,
+                                                              ElementAccumulator,
+                                                              ElementCompute,
+                                                              ElementC,
+                                                              GmemLayoutTagC,
+                                                              AlignmentC,
+                                                              ElementD_,
+                                                              GmemLayoutTagD,
+                                                              AlignmentD,
+                                                              FusionOperation,
+                                                              DispatchPolicy>::CollectiveOp;
+};
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+}   // namespace cutlass::epilogue::collective

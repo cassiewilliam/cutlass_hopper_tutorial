@@ -309,11 +309,13 @@ public:
 
     static size_t get_workspace_size(Arguments const& args)
     {
-        size_t             workspace_size      = 0;
+        size_t workspace_size = 0;
+
         constexpr uint32_t NumEpilogueSubTiles = CollectiveEpilogue::get_store_pipe_increment(
             TileShape{});
 
         workspace_size += CollectiveEpilogue::get_workspace_size(args.problem_shape, args.epilogue);
+
         workspace_size = round_nearest(workspace_size, MinWorkspaceAlignment);
 
         workspace_size += TileScheduler::template get_workspace_size<ProblemShape,
@@ -323,6 +325,7 @@ public:
             args.hw_info,
             NumMmaWarpGroups,
             NumEpilogueSubTiles);
+
         workspace_size = round_nearest(workspace_size, MinWorkspaceAlignment);
         return workspace_size;
     }

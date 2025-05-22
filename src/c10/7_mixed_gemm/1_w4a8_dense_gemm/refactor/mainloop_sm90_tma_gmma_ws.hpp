@@ -49,31 +49,23 @@
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-namespace cutlass::gemm::collective {
-using namespace cute;
+namespace cutlass_w4a8 {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // WarpSpecialized Mainloop that source A operand from registers
-template<int Stages_,
-         class ClusterShape_,
-         class KernelSchedule_,
-         class TileShape_,
-         class ElementAOptionalTuple,
-         class StrideA_,
-         class ElementBOptionalTuple,
-         class StrideB_,
-         class TiledMma_,
-         class GmemTiledCopyA_,
-         class SmemLayoutAtomA_,
-         class SmemCopyAtomA_,
-         class TransformA_,
-         class GmemTiledCopyB_,
-         class SmemLayoutAtomB_,
-         class SmemCopyAtomB_,
-         class TransformB_>
+template<typename KernelTraits>
 struct CollectiveMainloop
 {
+public:
+
+
+private:
+    template<class T>
+    friend struct detail::MixedInputUtilsX;
+    using CollectiveType = CollectiveMainloop<KernelTraits>;
+    using Utils = detail::MixedInputUtilsX<CollectiveType>;
+
 public:
     //
     // Type Aliases
@@ -81,55 +73,44 @@ public:
 
     // Dispatch Policy
     // Stages, ClusterShape, KernelSchedule_
-    static constexpr int Stages = Stages_;
+    static constexpr int Stages = KernelTraits::PipelineStages;
 
-    using ArchTag        = arch::Sm90;
-    using ClusterShape   = ClusterShape_;
-    using TileShape      = TileShape_;
-    using KernelSchedule = KernelSchedule_;
+    using ArchTag        = typename KernelTraits::ArchTag;
+    using ClusterShape   = typename KernelTraits::ClusterShape_MNK;
+    using TileShape      = typename KernelTraits::TileShape_MNK;
 
+    using CtaShape_MNK = decltype(shape_div(TileShape{}, ClusterShape{}));
 
-private:
-    template<class T>
-    friend struct detail::MixedInputUtilsX;
-    using CollectiveType = CollectiveMainloop<Stages,
-                                              ClusterShape,
-                                              KernelSchedule,
-                                              TileShape,
-                                              ElementAOptionalTuple,
-                                              StrideA_,
-                                              ElementBOptionalTuple,
-                                              StrideB_,
-                                              TiledMma_,
-                                              GmemTiledCopyA_,
-                                              SmemLayoutAtomA_,
-                                              SmemCopyAtomA_,
-                                              TransformA_,
-                                              GmemTiledCopyB_,
-                                              SmemLayoutAtomB_,
-                                              SmemCopyAtomB_,
-                                              TransformB_>;
+    using KernelSchedule = typename KernelTraits::KernelSchedule;
+    using ElementA       = typename KernelTraits::ElementA;
+    using ElementB       = typename KernelTraits::ElementB;
+    using ElementScale   = typename KernelTraits::ElementScale;
+    using StrideA        = typename KernelTraits::StrideA;
+    using StrideB        = typename KernelTraits::StrideB;
 
-    using Utils = detail::MixedInputUtilsX<CollectiveType>;
+    using TiledMma           = typename KernelTraits::TiledMma;
+    using ElementAccumulator = typename TiledMma::ValTypeC;
 
-    //
-    // Type Aliases
-    //
-    using ScaleA = detail::deduce_mixed_width_dtype_t<1, ElementAOptionalTuple>;
+    using GmemTiledCopyA     = typename KernelTraits::GmemTiledCopyA;
+    using GmemTiledCopyB     = typename KernelTraits::GmemTiledCopyB;
 
-public:
-    static_assert(cute::is_tuple<ElementAOptionalTuple>::value ^
-                      cute::is_tuple<ElementBOptionalTuple>::value,
-                  "Either A OR B must be a tuple. It must take the from {ElementOperand, "
-                  "[ElementScale]}, Inputs in [] are optional.");
+    // NOTE(Alan): 放到KernelTraits
+    using GmemTiledCopyScale = cute::SM90_TMA_LOAD;
 
-    using ElementA = detail::deduce_mixed_width_dtype_t<0, ElementAOptionalTuple>;
-    using ElementB = detail::deduce_mixed_width_dtype_t<0, ElementBOptionalTuple>;
+    using SmemLayoutAtomA = typename KernelTraits::SmemLayoutAtomA;
+    using SmemLayoutAtomB = typename KernelTraits::SmemLayoutAtomB;
 
-    using ElementScale = ScaleA;
+    using SmemCopyAtomA     = typename KernelTraits::SmemCopyAtomA;
+    using SmemCopyAtomB     = typename KernelTraits::SmemCopyAtomB;
 
-    using StrideA = StrideA_;
-    using StrideB = StrideB_;
+    using SmemCopyAtomScale = Copy_Atom<cute::AutoVectorizingCopy, ElementScale>;
+
+    // We must ensure the type to be scaled goes to RF
+    // ElementA is uint4b_t, UintElementAForBytes to uint4_t
+    // ElementB is float8_e4m3_t, UintElementBForBytes uint8_t
+    using UintElementAForBytes = uint_bit_t<sizeof_bits_v<ElementA>>;
+    using UintElementBForBytes = uint_bit_t<sizeof_bits_v<ElementB>>;
+
     // These are always MN major
     using StrideScale = cute::Stride<cute::Int<1>, int64_t, int64_t>;
     // For cases where we can't have a void scale, we can use this to allow the code to compile when
@@ -149,32 +130,6 @@ public:
 
     static_assert(cutlass::gemm::detail::is_mn_major<NonVoidStrideScale>(),
                   "Scale must be MN major [Col Major if A is scaled, Row Major if B is scaled].");
-
-    using CtaShape_MNK = decltype(shape_div(TileShape{}, ClusterShape{}));
-
-    using TiledMma           = TiledMma_;
-    using ElementAccumulator = typename TiledMma::ValTypeC;
-
-    using GmemTiledCopyA     = GmemTiledCopyA_;
-    using GmemTiledCopyB     = GmemTiledCopyB_;
-    using GmemTiledCopyScale = cute::SM90_TMA_LOAD;
-
-    using SmemLayoutAtomA = SmemLayoutAtomA_;
-    using SmemLayoutAtomB = SmemLayoutAtomB_;
-    // Scale layout atom set after swapping.
-
-    using SmemCopyAtomA     = SmemCopyAtomA_;
-    using SmemCopyAtomB     = SmemCopyAtomB_;
-    using SmemCopyAtomScale = Copy_Atom<cute::AutoVectorizingCopy, ElementScale>;
-
-    // We must ensure the type to be scaled goes to RF
-    // ElementA is uint4b_t, UintElementAForBytes to uint4_t
-    // ElementB is float8_e4m3_t, UintElementBForBytes uint8_t
-    using UintElementAForBytes = uint_bit_t<sizeof_bits_v<ElementA>>;
-    using UintElementBForBytes = uint_bit_t<sizeof_bits_v<ElementB>>;
-
-    using TransformA = TransformA_;
-    using TransformB = TransformB_;
 
     static constexpr int IsSubbyteA = cute::sizeof_bits_v<UintElementAForBytes> < 8;
 
@@ -200,6 +155,7 @@ public:
     static_assert(cute::rank(SmemLayoutAtomA{}) == 2, "SmemLayoutAtom must be rank 2 (M/N, K)");
     static_assert((size<0>(TileShape{}) % size<0>(SmemLayoutAtomA{})) == 0,
                   "SmemLayoutAtom must evenly divide tile shape.");
+
     static_assert((size<2>(TileShape{}) % size<1>(SmemLayoutAtomA{})) == 0,
                   "SmemLayoutAtom must evenly divide tile shape.");
 
@@ -217,12 +173,8 @@ public:
 
     // Tile along modes in a way that maximizes the TMA box size.
 
-    using SmemLayoutA = decltype(detail::get_smem_layout<Stages>(SmemLayoutAtomA{},
-                                                                 select<0, 2>(TileShape{}),
-                                                                 StrideA{}));
-    using SmemLayoutB = decltype(detail::get_smem_layout<Stages>(SmemLayoutAtomB{},
-                                                                 select<1, 2>(TileShape{}),
-                                                                 StrideB{}));
+    using SmemLayoutA = typename KernelTraits::SmemLayoutA;
+    using SmemLayoutB = typename KernelTraits::SmemLayoutB;
 
     // It is assumed that the scales and zero-points share the same smem layout
     using SmemLayoutScale = decltype(tile_to_shape(
@@ -250,6 +202,7 @@ public:
     static_assert(size<1>(SmemLayoutAtomScale{}) == 1, "size<1>(SmemLayoutAtomScale) must be 1.");
 
 public:
+
     static constexpr bool UseScaleLookupTable = cutlass::detail::is_Array_v<ElementScale>;
 
     static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(SmemLayoutA{});
@@ -277,6 +230,7 @@ public:
         using PipelineStorage = typename MainloopPipeline::SharedStorage;
         PipelineStorage pipeline;
     };
+    
     using TensorStorage   = typename SharedStorage::TensorStorage;
     using PipelineStorage = typename SharedStorage::PipelineStorage;
 
