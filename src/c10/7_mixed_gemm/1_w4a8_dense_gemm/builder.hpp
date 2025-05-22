@@ -2,10 +2,56 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
 #include "dispatch_policy_extra.hpp"
+#include "mainloop_sm90_tma_gmma_ws_x.hpp"
 
 namespace cutlass::gemm::collective {
 
 
+namespace detail {
+// Returns the maximum number of smem tiles that can be used with a given smem capacity (with an
+// optional scale matrix), or overrides with manual count.
+template<int capacity_bytes_,
+         class ElementA,
+         class ElementB,
+         class ElementScale,
+         class TileShapeMNK,
+         int carveout_bytes_,
+         int alignment = 128>
+constexpr int compute_stage_count_or_override_single_affine_transformed_input_no_zero(
+    StageCountAutoCarveout<carveout_bytes_> stage_count)
+{
+
+    // 32 bytes to account for barriers etc.
+    constexpr auto mainloop_pipeline_bytes = sizeof(
+        typename cutlass::PipelineTmaAsync<1>::SharedStorage);
+    constexpr int scale_zero_k_tile = 1;
+
+    constexpr auto a_bits = cute::sizeof_bits_v<ElementA>;
+    constexpr auto b_bits = cute::sizeof_bits_v<ElementB>;
+
+    constexpr auto s_bits = get_bits_for_possibly_void_element<ElementScale>();
+
+    constexpr auto scale_bytes = cutlass::bits_to_bytes(s_bits * size<0>(TileShapeMNK{}) *
+                                                        scale_zero_k_tile);
+
+    static_assert(scale_bytes % 128 == 0, "Scale bytes must be a multiple of 128");
+
+    // When scales are void, s_bits will be 0 so no smem will be allocated for scales.
+    constexpr int stage_bytes_ = cutlass::bits_to_bytes(a_bits * size<0>(TileShapeMNK{}) *
+                                                        size<2>(TileShapeMNK{})) +
+                                 cutlass::bits_to_bytes(b_bits * size<1>(TileShapeMNK{}) *
+                                                        size<2>(TileShapeMNK{})) +
+                                 scale_bytes;
+
+    constexpr int stage_bytes = cutlass::round_up(stage_bytes_, alignment) +
+                                static_cast<int>(mainloop_pipeline_bytes);
+
+    constexpr int carveout_bytes = cutlass::round_up(carveout_bytes_, alignment);
+    constexpr int capacity_bytes = capacity_bytes_ / alignment * alignment;
+
+    return (capacity_bytes - carveout_bytes) / stage_bytes;
+}
+}   // namespace detail
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // GMMA_TMA_WS_RS
@@ -45,7 +91,6 @@ struct CollectiveBuilder<
 
 private:
     using ScaleA = detail::deduce_mixed_width_dtype_t<1, ElementA_>;
-    using ZeroA  = detail::deduce_mixed_width_dtype_t<2, ElementA_>;
 
 public:
     // ElementA is uint4b_t
@@ -79,9 +124,7 @@ public:
     using ElementPairA = ElementA_;
     using ElementPairB = ElementB_;
 
-    static constexpr bool IsATransformed = true;
-    using ElementScale                   = ScaleA;
-    using ElementZero                    = ZeroA;
+    using ElementScale = ScaleA;
 
     static_assert(is_static<TileShape_MNK>::value);
     static_assert(is_static<ClusterShape_MNK>::value);
@@ -178,20 +221,15 @@ public:
     static constexpr int Sm90ReducedSmemCapacityBytes = detail::sm90_smem_capacity_bytes -
                                                         KernelSmemCarveout;
 
-    static constexpr int
-        PipelineStages = detail::compute_stage_count_or_override_single_affine_transformed_input<
+    static constexpr int PipelineStages = detail::
+        compute_stage_count_or_override_single_affine_transformed_input_no_zero<
             detail::sm90_smem_capacity_bytes,
             RealElementA,
             RealElementB,
             ElementScale,
-            ElementZero,
             TileShape_MNK,
             StageCountType::bytes,
             SmemAlignment>(StageCountType{});
-
-    using DispatchPolicy = MainloopSm90TmaGmmaRmemAWarpSpecializedMixedInputX<PipelineStages,
-                                                                              ClusterShape_MNK,
-                                                                              KernelScheduleType>;
 
     using SmemCopyAtomA = Copy_Atom<cute::AutoVectorizingCopy, ElementA>;
     using SmemCopyAtomB = void;
@@ -207,21 +245,23 @@ public:
         GmemLayoutBTag_,
         TagToStrideB_t<GmemLayoutBTag>>;
 
-    using CollectiveOp = CollectiveMma<DispatchPolicy,
-                                       TileShape_MNK,
-                                       ElementPairA,
-                                       StrideA,
-                                       ElementPairB,
-                                       StrideB,
-                                       TiledMma,
-                                       GmemTiledCopyA,
-                                       SmemLayoutAtomA,
-                                       SmemCopyAtomA,
-                                       cute::identity,
-                                       GmemTiledCopyB,
-                                       SmemLayoutAtomB,
-                                       SmemCopyAtomB,
-                                       cute::identity>;
+    using CollectiveOp = CollectiveMainloop<PipelineStages,
+                                            ClusterShape_MNK,
+                                            KernelScheduleType,
+                                            TileShape_MNK,
+                                            ElementPairA,
+                                            StrideA,
+                                            ElementPairB,
+                                            StrideB,
+                                            TiledMma,
+                                            GmemTiledCopyA,
+                                            SmemLayoutAtomA,
+                                            SmemCopyAtomA,
+                                            cute::identity,
+                                            GmemTiledCopyB,
+                                            SmemLayoutAtomB,
+                                            SmemCopyAtomB,
+                                            cute::identity>;
 
     static_assert(SmemAlignment == static_cast<int>(cute::max(CollectiveOp::SmemAlignmentA,
                                                               CollectiveOp::SmemAlignmentB)));

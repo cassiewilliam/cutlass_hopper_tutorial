@@ -55,8 +55,8 @@ using namespace cute;
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // WarpSpecialized Mainloop that source A operand from registers
-template<int Stages,
-         class ClusterShape,
+template<int Stages_,
+         class ClusterShape_,
          class KernelSchedule_,
          class TileShape_,
          class ElementAOptionalTuple,
@@ -72,51 +72,43 @@ template<int Stages,
          class SmemLayoutAtomB_,
          class SmemCopyAtomB_,
          class TransformB_>
-struct CollectiveMma<
-    MainloopSm90TmaGmmaRmemAWarpSpecializedMixedInputX<Stages, ClusterShape, KernelSchedule_>,
-    TileShape_,
-    ElementAOptionalTuple,
-    StrideA_,
-    ElementBOptionalTuple,
-    StrideB_,
-    TiledMma_,
-    GmemTiledCopyA_,
-    SmemLayoutAtomA_,
-    SmemCopyAtomA_,
-    TransformA_,
-    GmemTiledCopyB_,
-    SmemLayoutAtomB_,
-    SmemCopyAtomB_,
-    TransformB_>
+struct CollectiveMainloop
 {
 public:
     //
     // Type Aliases
     //
-    using DispatchPolicy = MainloopSm90TmaGmmaRmemAWarpSpecializedMixedInputX<Stages,
-                                                                              ClusterShape,
-                                                                              KernelSchedule_>;
+
+    // Dispatch Policy
+    // Stages, ClusterShape, KernelSchedule_
+
+    using ArchTag        = arch::Sm90;
+    static constexpr int Stages = Stages_;
+    using ClusterShape   = ClusterShape_;
     using TileShape      = TileShape_;
     using KernelSchedule = KernelSchedule_;
+
 
 private:
     template<class T>
     friend struct detail::MixedInputUtilsX;
-    using CollectiveType = CollectiveMma<DispatchPolicy,
-                                         TileShape_,
-                                         ElementAOptionalTuple,
-                                         StrideA_,
-                                         ElementBOptionalTuple,
-                                         StrideB_,
-                                         TiledMma_,
-                                         GmemTiledCopyA_,
-                                         SmemLayoutAtomA_,
-                                         SmemCopyAtomA_,
-                                         TransformA_,
-                                         GmemTiledCopyB_,
-                                         SmemLayoutAtomB_,
-                                         SmemCopyAtomB_,
-                                         TransformB_>;
+    using CollectiveType = CollectiveMainloop<Stages,
+                                              ClusterShape,
+                                              KernelSchedule,
+                                              TileShape,
+                                              ElementAOptionalTuple,
+                                              StrideA_,
+                                              ElementBOptionalTuple,
+                                              StrideB_,
+                                              TiledMma_,
+                                              GmemTiledCopyA_,
+                                              SmemLayoutAtomA_,
+                                              SmemCopyAtomA_,
+                                              TransformA_,
+                                              GmemTiledCopyB_,
+                                              SmemLayoutAtomB_,
+                                              SmemCopyAtomB_,
+                                              TransformB_>;
 
     using Utils = detail::MixedInputUtilsX<CollectiveType>;
 
@@ -191,10 +183,8 @@ public:
     // in case we have array. translating to uint to satisfy tma descriptor's specialization
     using TmaElementScale = uint_bit_t<sizeof_bits_v<ElementScale>>;
 
-    using ArchTag = typename DispatchPolicy::ArchTag;
-
-    using MainloopPipeline = cutlass::PipelineTmaAsync<DispatchPolicy::Stages>;
-    using PipelineState    = cutlass::PipelineState<DispatchPolicy::Stages>;
+    using MainloopPipeline = cutlass::PipelineTmaAsync<Stages>;
+    using PipelineState    = cutlass::PipelineState<Stages>;
 
     using PipelineParams = typename MainloopPipeline::Params;
 
@@ -227,14 +217,12 @@ public:
 
     // Tile along modes in a way that maximizes the TMA box size.
 
-    using SmemLayoutA = decltype(detail::get_smem_layout<DispatchPolicy::Stages>(
-        SmemLayoutAtomA{},
-        select<0, 2>(TileShape{}),
-        StrideA{}));
-    using SmemLayoutB = decltype(detail::get_smem_layout<DispatchPolicy::Stages>(
-        SmemLayoutAtomB{},
-        select<1, 2>(TileShape{}),
-        StrideB{}));
+    using SmemLayoutA = decltype(detail::get_smem_layout<Stages>(SmemLayoutAtomA{},
+                                                                 select<0, 2>(TileShape{}),
+                                                                 StrideA{}));
+    using SmemLayoutB = decltype(detail::get_smem_layout<Stages>(SmemLayoutAtomB{},
+                                                                 select<1, 2>(TileShape{}),
+                                                                 StrideB{}));
 
     // It is assumed that the scales and zero-points share the same smem layout
     using SmemLayoutScale = decltype(tile_to_shape(
@@ -244,8 +232,7 @@ public:
                             Step<_2, _1, _3>,
                             Step<_1, _2, _3>>{}));
 
-    static_assert(DispatchPolicy::Stages >= 2,
-                  "Specialization requires Stages set to value 2 or more.");
+    static_assert(Stages >= 2, "Specialization requires Stages set to value 2 or more.");
     static_assert(
         not cute::is_base_of<cute::GMMA::DescriptorIterator, typename TiledMma::FrgTypeA>::value &&
             cute::is_base_of<cute::GMMA::DescriptorIterator, typename TiledMma::FrgTypeB>::value,
@@ -496,7 +483,7 @@ public:
                check_aligned_Z;
     }
 
-    static constexpr int      K_PIPE_MAX            = DispatchPolicy::Stages;
+    static constexpr int      K_PIPE_MAX            = Stages;
     static constexpr uint32_t TmaTransactionBytesMK = Utils::compute_tma_transaction_bytes_mk();
     static constexpr uint32_t TmaTransactionBytesNK = Utils::compute_tma_transaction_bytes_nk();
     static constexpr uint32_t
@@ -616,8 +603,8 @@ public:
         // Maps the tile -> block, value
         if constexpr (cute::is_same_v<GmemTiledCopyA, SM90_TMA_LOAD_MULTICAST>)
         {
-            auto block_layout = Layout<typename DispatchPolicy::ClusterShape>{};   // (m,n) ->
-                                                                                   // block_id
+            auto block_layout = Layout<ClusterShape>{};   // (m,n) ->
+                                                          // block_id
             for (int n = 0; n < size<1>(block_layout); ++n)
             {
                 mcast_mask_a |= (uint16_t(1)
@@ -627,8 +614,8 @@ public:
 
         if constexpr (cute::is_same_v<GmemTiledCopyB, SM90_TMA_LOAD_MULTICAST>)
         {
-            auto block_layout = Layout<typename DispatchPolicy::ClusterShape>{};   // (m,n) ->
-                                                                                   // block_id
+            auto block_layout = Layout<ClusterShape>{};   // (m,n) ->
+                                                          // block_id
             for (int m = 0; m < size<0>(block_layout); ++m)
             {
                 mcast_mask_b |= (uint16_t(1)
@@ -807,8 +794,8 @@ public:
         CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<2>(accum));                // N
         CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCsB));                 // K
         CUTE_STATIC_ASSERT_V(size<3>(tCsA) == size<3>(tCsB));                 // PIPE
-        CUTE_STATIC_ASSERT_V(Int<DispatchPolicy::Stages>{} == size<2>(sA));   // PIPE
-        CUTE_STATIC_ASSERT_V(Int<DispatchPolicy::Stages>{} == size<2>(sB));   // PIPE
+        CUTE_STATIC_ASSERT_V(Int<Stages>{} == size<2>(sA));                   // PIPE
+        CUTE_STATIC_ASSERT_V(Int<Stages>{} == size<2>(sB));                   // PIPE
 
         //
         // PIPELINED MAIN LOOP
