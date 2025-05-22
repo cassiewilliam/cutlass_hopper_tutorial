@@ -1,95 +1,29 @@
-/***************************************************************************************************
- * Copyright (c) 2023 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- * list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * 3. Neither the name of the copyright holder nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- **************************************************************************************************/
 #pragma once
 
-#include "cutlass/cuda_host_adapter.hpp"
-#include "cutlass/cutlass.h"
-#include "cutlass/numeric_types.h"
 #include "cutlass/pipeline/pipeline.hpp"
-#include "cutlass/trace.h"
+#include <cutlass/array.h>
+#include <cutlass/barrier.h>
+#include <cutlass/cutlass.h>
+#include <cutlass/numeric_conversion.h>
+#include <cutlass/numeric_types.h>
 
-#include "cute/algorithm/functional.hpp"
-#include "cute/algorithm/gemm.hpp"
-#include "cute/arch/cluster_sm90.hpp"
-#include "cute/arch/copy_sm90.hpp"
-#include "cute/atom/mma_atom.hpp"
-#include "cute/numeric/arithmetic_tuple.hpp"
-#include "cute/tensor_predicate.hpp"
+#include "cute/tensor.hpp"
 
-#include "dispatch_policy_extra.hpp"
-#include "mixed_input_utils_x.hpp"
+#include "cutlass/gemm/collective/collective_builder.hpp"
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
+namespace cutlass_w4a8 {
 
-namespace cutlass::gemm::collective {
-using namespace cute;
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-// WarpSpecialized Mainloop that source A operand from registers
-template<int Stages,
-         class ClusterShape,
-         class KernelSchedule_,
-         class TileShape_,
-         class ElementAOptionalTuple,
-         class StrideA_,
-         class ElementBOptionalTuple,
-         class StrideB_,
-         class TiledMma_,
-         class GmemTiledCopyA_,
-         class SmemLayoutAtomA_,
-         class SmemCopyAtomA_,
-         class TransformA_,
-         class GmemTiledCopyB_,
-         class SmemLayoutAtomB_,
-         class SmemCopyAtomB_,
-         class TransformB_>
-struct CollectiveMma<
-    MainloopSm90TmaGmmaRmemAWarpSpecializedMixedInputX<Stages, ClusterShape, KernelSchedule_>,
-    TileShape_,
-    ElementAOptionalTuple,
-    StrideA_,
-    ElementBOptionalTuple,
-    StrideB_,
-    TiledMma_,
-    GmemTiledCopyA_,
-    SmemLayoutAtomA_,
-    SmemCopyAtomA_,
-    TransformA_,
-    GmemTiledCopyB_,
-    SmemLayoutAtomB_,
-    SmemCopyAtomB_,
-    TransformB_>
+template<typename KTraits>
+struct CollectiveMainloop
 {
 public:
+    enum class ConversionMode
+    {
+        DirectConvert,
+        ConvertAndScale,
+        ConvertAndScaleWithZero
+    };
+
     //
     // Type Aliases
     //
@@ -101,7 +35,7 @@ public:
 
 private:
     template<class T>
-    friend struct detail::MixedInputUtilsX;
+    friend struct detail::MixedInputUtils;
     using CollectiveType = CollectiveMma<DispatchPolicy,
                                          TileShape_,
                                          ElementAOptionalTuple,
@@ -118,23 +52,33 @@ private:
                                          SmemCopyAtomB_,
                                          TransformB_>;
 
-    using Utils = detail::MixedInputUtilsX<CollectiveType>;
+    using Utils = detail::MixedInputUtils<CollectiveType>;
 
     //
     // Type Aliases
     //
     using ScaleA = detail::deduce_mixed_width_dtype_t<1, ElementAOptionalTuple>;
+    using ScaleB = detail::deduce_mixed_width_dtype_t<1, ElementBOptionalTuple>;
+    using ZeroA  = detail::deduce_mixed_width_dtype_t<2, ElementAOptionalTuple>;
+    using ZeroB  = detail::deduce_mixed_width_dtype_t<2, ElementBOptionalTuple>;
 
 public:
-    static_assert(cute::is_tuple<ElementAOptionalTuple>::value ^
-                      cute::is_tuple<ElementBOptionalTuple>::value,
-                  "Either A OR B must be a tuple. It must take the from {ElementOperand, "
-                  "[ElementScale]}, Inputs in [] are optional.");
+    static_assert(
+        cute::is_tuple<ElementAOptionalTuple>::value ^ cute::is_tuple<ElementBOptionalTuple>::value,
+        "Either A OR B must be a tuple. It must take the from {ElementOperand, [ElementScale],"
+        "[ElementZero]}. Inputs in [] are optional.");
 
     using ElementA = detail::deduce_mixed_width_dtype_t<0, ElementAOptionalTuple>;
     using ElementB = detail::deduce_mixed_width_dtype_t<0, ElementBOptionalTuple>;
-
-    using ElementScale = ScaleA;
+    static constexpr bool IsATransformed = cute::is_tuple<ElementAOptionalTuple>::value;
+    using ElementScale                   = cute::conditional_t<IsATransformed, ScaleA, ScaleB>;
+    using ElementZero                    = cute::conditional_t<IsATransformed, ZeroA, ZeroB>;
+    // For cases where we can't have a void type, we can use this to allow the code to compile when
+    // the scale / zero is void.
+    using NonVoidElementScale = cute::
+        conditional_t<cute::is_void_v<ElementScale>, float, ElementScale>;
+    using NonVoidElementZero = cute::
+        conditional_t<cute::is_void_v<ElementZero>, float, ElementZero>;
 
     using StrideA = StrideA_;
     using StrideB = StrideB_;
@@ -146,10 +90,14 @@ public:
                                                    cute::Stride<_1, int64_t, int64_t>,
                                                    StrideScale>;
 
-    static_assert(((cutlass::gemm::detail::is_k_major<StrideA>() || is_layout<StrideA>::value)),
+    static_assert((IsATransformed &&
+                   (cutlass::gemm::detail::is_k_major<StrideA>() || is_layout<StrideA>::value)) ||
+                      (!IsATransformed &&
+                       (cutlass::gemm::detail::is_k_major<StrideB>() || is_layout<StrideB>::value)),
                   "The transformed type must be K-major.");
 
-    static_assert(((sizeof(ElementB) == 2)) ||
+    static_assert((IsATransformed && (sizeof(ElementB) == 2)) ||
+                      (!IsATransformed && (sizeof(ElementA) == 2)) ||
                       ((cutlass::gemm::detail::is_k_major<StrideA>() ||
                         is_layout<StrideA>::value) &&
                        (cutlass::gemm::detail::is_k_major<StrideB>() || is_layout<StrideB>::value)),
@@ -173,23 +121,40 @@ public:
 
     using SmemCopyAtomA     = SmemCopyAtomA_;
     using SmemCopyAtomB     = SmemCopyAtomB_;
-    using SmemCopyAtomScale = Copy_Atom<cute::AutoVectorizingCopy, ElementScale>;
+    using SmemCopyAtomScale = Copy_Atom<cute::AutoVectorizingCopy, NonVoidElementScale>;
 
     // We must ensure the type to be scaled goes to RF
-    // ElementA is uint4b_t, UintElementAForBytes to uint4_t
-    // ElementB is float8_e4m3_t, UintElementBForBytes uint8_t
-    using UintElementAForBytes = uint_bit_t<sizeof_bits_v<ElementA>>;
-    using UintElementBForBytes = uint_bit_t<sizeof_bits_v<ElementB>>;
+    static constexpr bool SwapAB = !IsATransformed;
+    using SwappedSmemLayoutAtomA = cute::conditional_t<!SwapAB, SmemLayoutAtomA, SmemLayoutAtomB>;
+    using SwappedSmemLayoutAtomB = cute::conditional_t<!SwapAB, SmemLayoutAtomB, SmemLayoutAtomA>;
+    using SwappedSmemCopyAtomA   = cute::conditional_t<!SwapAB, SmemCopyAtomA, SmemCopyAtomB>;
+    using SwappedSmemCopyAtomB   = cute::conditional_t<!SwapAB, SmemCopyAtomB, SmemCopyAtomA>;
 
-    using TransformA = TransformA_;
-    using TransformB = TransformB_;
+    // TMA converts f32 input to tf32 when copying from GMEM to SMEM
+    // For all other types, cast to size equivalent uint type to avoid any rounding by TMA.
+    static constexpr bool ConvertF32toTF32A = cute::is_same_v<float, ElementA>;
+    static constexpr bool ConvertF32toTF32B = cute::is_same_v<float, ElementB>;
+    using ConvertedElementA                 = cute::
+        conditional_t<ConvertF32toTF32A, tfloat32_t, uint_bit_t<sizeof_bits_v<ElementA>>>;
+    using ConvertedElementB = cute::
+        conditional_t<ConvertF32toTF32B, tfloat32_t, uint_bit_t<sizeof_bits_v<ElementB>>>;
+    using RealSwappedElementA = cute::conditional_t<!SwapAB, ElementA, ElementB>;
+    using RealSwappedElementB = cute::conditional_t<!SwapAB, ElementB, ElementA>;
+    using SwappedElementA     = cute::conditional_t<!SwapAB, ConvertedElementA, ConvertedElementB>;
+    using SwappedElementB     = cute::conditional_t<!SwapAB, ConvertedElementB, ConvertedElementA>;
+    using SwappedStrideA      = cute::conditional_t<!SwapAB, StrideA, StrideB>;
+    using SwappedStrideB      = cute::conditional_t<!SwapAB, StrideB, StrideA>;
 
-    static constexpr int IsSubbyteA = cute::sizeof_bits_v<UintElementAForBytes> < 8;
+    using TransformA        = TransformA_;
+    using TransformB        = TransformB_;
+    using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
+    using SwappedTransformB = cute::conditional_t<!SwapAB, TransformB, TransformA>;
 
-    using TmaElementA = cute::conditional_t<IsSubbyteA, uint8_t, UintElementAForBytes>;
-
-    // in case we have array. translating to uint to satisfy tma descriptor's specialization
-    using TmaElementScale = uint_bit_t<sizeof_bits_v<ElementScale>>;
+    static constexpr int IsSubbyteA = cute::sizeof_bits_v<SwappedElementA> < 8;
+    using TmaElementA               = cute::conditional_t<IsSubbyteA, uint8_t, SwappedElementA>;
+    using TmaElementScale           = uint_bit_t<
+                  sizeof_bits_v<NonVoidElementScale>>;   // in case we have array. translating to uint to
+                                                         // satisfy tma descriptor's specialization
 
     using ArchTag = typename DispatchPolicy::ArchTag;
 
@@ -202,21 +167,22 @@ public:
     static constexpr int NumProducerThreadEvents = 1;
 
     using SmemLayoutAtomScale = Layout<
-        Shape<decltype(cute::shape<0>(SmemLayoutAtomA{})), cute::Int<1>>>;
-
+        Shape<decltype(cute::shape<0>(SwappedSmemLayoutAtomA{})), cute::Int<1>>>;
     using ScaleTileShape = decltype(make_shape(shape<0>(TileShape{}),
                                                shape<1>(SmemLayoutAtomScale{})));
 
-    static_assert(cute::rank(SmemLayoutAtomA{}) == 2, "SmemLayoutAtom must be rank 2 (M/N, K)");
-    static_assert((size<0>(TileShape{}) % size<0>(SmemLayoutAtomA{})) == 0,
+    static_assert(cute::rank(SwappedSmemLayoutAtomA{}) == 2,
+                  "SmemLayoutAtom must be rank 2 (M/N, K)");
+    static_assert((size<0>(TileShape{}) % size<0>(SwappedSmemLayoutAtomA{})) == 0,
                   "SmemLayoutAtom must evenly divide tile shape.");
-    static_assert((size<2>(TileShape{}) % size<1>(SmemLayoutAtomA{})) == 0,
+    static_assert((size<2>(TileShape{}) % size<1>(SwappedSmemLayoutAtomA{})) == 0,
                   "SmemLayoutAtom must evenly divide tile shape.");
 
-    static_assert(cute::rank(SmemLayoutAtomB{}) == 2, "SmemLayoutAtom must be rank 2 (M/N, K)");
-    static_assert((size<1>(TileShape{}) % size<0>(SmemLayoutAtomB{})) == 0,
+    static_assert(cute::rank(SwappedSmemLayoutAtomB{}) == 2,
+                  "SmemLayoutAtom must be rank 2 (M/N, K)");
+    static_assert((size<1>(TileShape{}) % size<0>(SwappedSmemLayoutAtomB{})) == 0,
                   "SmemLayoutAtom must evenly divide tile shape.");
-    static_assert((size<2>(TileShape{}) % size<1>(SmemLayoutAtomB{})) == 0,
+    static_assert((size<2>(TileShape{}) % size<1>(SwappedSmemLayoutAtomB{})) == 0,
                   "SmemLayoutAtom must evenly divide tile shape.");
 
     static_assert(rank(SmemLayoutAtomScale{}) == 2, "SmemLayoutAtomScale must be rank 2");
@@ -228,13 +194,13 @@ public:
     // Tile along modes in a way that maximizes the TMA box size.
 
     using SmemLayoutA = decltype(detail::get_smem_layout<DispatchPolicy::Stages>(
-        SmemLayoutAtomA{},
+        SwappedSmemLayoutAtomA{},
         select<0, 2>(TileShape{}),
-        StrideA{}));
+        SwappedStrideA{}));
     using SmemLayoutB = decltype(detail::get_smem_layout<DispatchPolicy::Stages>(
-        SmemLayoutAtomB{},
+        SwappedSmemLayoutAtomB{},
         select<1, 2>(TileShape{}),
-        StrideB{}));
+        SwappedStrideB{}));
 
     // It is assumed that the scales and zero-points share the same smem layout
     using SmemLayoutScale = decltype(tile_to_shape(
@@ -262,9 +228,31 @@ public:
     // Deleting this assertion without required changes will cause the code to hang.
     static_assert(size<1>(SmemLayoutAtomScale{}) == 1, "size<1>(SmemLayoutAtomScale) must be 1.");
 
-public:
-    static constexpr bool UseScaleLookupTable = cutlass::detail::is_Array_v<ElementScale>;
+private:
+    static constexpr ConversionMode get_conversion_mode()
+    {
+        if constexpr (cute::is_void_v<ElementScale>)
+        {
+            return ConversionMode::DirectConvert;
+        }
+        else if constexpr (cute::is_void_v<ElementZero>)
+        {
+            return ConversionMode::ConvertAndScale;
+        }
+        else
+        {
+            return ConversionMode::ConvertAndScaleWithZero;
+        }
+    }
 
+public:
+    static constexpr ConversionMode KernelConversionMode = get_conversion_mode();
+    static constexpr bool ModeHasScales = KernelConversionMode == ConversionMode::ConvertAndScale ||
+                                          KernelConversionMode ==
+                                              ConversionMode::ConvertAndScaleWithZero;
+    static constexpr bool UseScaleLookupTable = KernelConversionMode ==
+                                                    ConversionMode::ConvertAndScale &&
+                                                cutlass::detail::is_Array_v<ElementScale>;
     static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(SmemLayoutA{});
 
     static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(SmemLayoutB{});
@@ -278,13 +266,15 @@ public:
     struct SharedStorage
     {
         static constexpr int scale_elements = Utils::elements_per_smem_scale();
+        static constexpr int zero_elements  = Utils::elements_per_smem_zero();
         struct TensorStorage
         {
             CUTE_ALIGNAS(SmemAlignmentA)
-            cute::ArrayEngine<ElementA, cute::cosize_v<SmemLayoutA>> smem_A;
+            cute::ArrayEngine<RealSwappedElementA, cute::cosize_v<SmemLayoutA>> smem_A;
             CUTE_ALIGNAS(SmemAlignmentB)
             cute::ArrayEngine<typename TiledMma::ValTypeB, cute::cosize_v<SmemLayoutB>> smem_B;
-            cute::ArrayEngine<ElementScale, scale_elements>                             smem_scale;
+            cute::ArrayEngine<NonVoidElementScale, scale_elements>                      smem_scale;
+            cute::ArrayEngine<NonVoidElementZero, zero_elements>                        smem_zero;
         } tensors;
 
         using PipelineStorage = typename MainloopPipeline::SharedStorage;
@@ -303,6 +293,7 @@ public:
         ElementScale const* ptr_S = nullptr;
         NonVoidStrideScale  dS{};
         int                 group_size             = 0;
+        ElementZero const*  ptr_Z                  = nullptr;
         uint32_t            mma_promotion_interval = 4;
     };
 
@@ -311,14 +302,14 @@ public:
     {
     public:
         // Assumption: StrideA is congruent with Problem_MK
-        using LayoutA = decltype(detail::get_gmem_layout(repeat_like(StrideA{}, int32_t(0)),
-                                                         StrideA{}));
-        using LayoutB = decltype(detail::get_gmem_layout(repeat_like(StrideB{}, int32_t(0)),
-                                                         StrideB{}));
+        using LayoutA = decltype(detail::get_gmem_layout(repeat_like(SwappedStrideA{}, int32_t(0)),
+                                                         SwappedStrideA{}));
+        using LayoutB = decltype(detail::get_gmem_layout(repeat_like(SwappedStrideB{}, int32_t(0)),
+                                                         SwappedStrideB{}));
 
         using TMA_A = decltype(make_tma_copy_A_sm90<TmaElementA>(
             GmemTiledCopyA{},
-            make_tensor(detail::get_logical_ptr(static_cast<UintElementAForBytes const*>(nullptr)),
+            make_tensor(detail::get_logical_ptr(static_cast<SwappedElementA const*>(nullptr)),
                         LayoutA{}),
             SmemLayoutA{}(_, _, cute::Int<0>{}),
             TileShape{},
@@ -326,7 +317,17 @@ public:
 
         using TMA_Scale = decltype(make_tma_copy<TmaElementScale>(
             GmemTiledCopyScale{},
-            make_tensor(detail::get_logical_ptr(static_cast<ElementScale const*>(nullptr)),
+            make_tensor(detail::get_logical_ptr(static_cast<NonVoidElementScale const*>(nullptr)),
+                        repeat_like(NonVoidStrideScale{}, int32_t(0)),
+                        NonVoidStrideScale{}),
+            SmemLayoutScale{}(_, _, cute::Int<0>{}),
+            ScaleTileShape{},
+            _1{}));   // mcast along N mode for this M load, if any. Scale is ALWAYS loaded with A
+                      // for RF kernel
+
+        using TMA_Zero = decltype(make_tma_copy(
+            GmemTiledCopyScale{},
+            make_tensor(detail::get_logical_ptr(static_cast<NonVoidElementZero const*>(nullptr)),
                         repeat_like(NonVoidStrideScale{}, int32_t(0)),
                         NonVoidStrideScale{}),
             SmemLayoutScale{}(_, _, cute::Int<0>{}),
@@ -337,7 +338,7 @@ public:
         // Assumption: StrideB is congruent with Problem_NK
         using TMA_B = decltype(make_tma_copy_B_sm90(
             GmemTiledCopyB{},
-            make_tensor(detail::get_logical_ptr(static_cast<UintElementBForBytes const*>(nullptr)),
+            make_tensor(detail::get_logical_ptr(static_cast<SwappedElementB const*>(nullptr)),
                         LayoutB{}),
             SmemLayoutB{}(_, _, cute::Int<0>{}),
             TileShape{},
@@ -345,12 +346,13 @@ public:
         TMA_A     tma_load_a;
         TMA_B     tma_load_b;
         TMA_Scale tma_load_scale;
+        TMA_Zero  tma_load_zero;
         int64_t   scale_k;
         int       group_size;
         uint32_t  tma_transaction_bytes = TmaTransactionBytes;
         int       reload_factor = (group_size + size<2>(TileShape{}) - 1) / size<2>(TileShape{});
-        StrideA   dA;
-        StrideB   dB;
+        SwappedStrideA dA;
+        SwappedStrideB dB;
     };
 
     //
@@ -369,21 +371,36 @@ public:
         auto problem_shape_MNKL = append<4>(problem_shape, 1);
         auto [M, N, K, L]       = problem_shape_MNKL;
 
-        UintElementAForBytes const* ptr_A;
-        StrideA                     dA;
-        UintElementBForBytes const* ptr_B;
-        StrideB                     dB;
+        if constexpr (SwapAB)
+        {
+            M = get<1>(problem_shape_MNKL);
+            N = get<0>(problem_shape_MNKL);
+        }
 
-        ptr_A = reinterpret_cast<UintElementAForBytes const*>(args.ptr_A);
-        ptr_B = reinterpret_cast<UintElementBForBytes const*>(args.ptr_B);
-        dA    = args.dA;
-        dB    = args.dB;
+        SwappedElementA const* ptr_A;
+        SwappedStrideA         dA;
+        SwappedElementB const* ptr_B;
+        SwappedStrideB         dB;
 
-        Tensor tensor_a = make_tensor(detail::get_logical_ptr(ptr_A),
+        if constexpr (not SwapAB)
+        {
+            ptr_A = reinterpret_cast<SwappedElementA const*>(args.ptr_A);
+            ptr_B = reinterpret_cast<SwappedElementB const*>(args.ptr_B);
+            dA    = args.dA;
+            dB    = args.dB;
+        }
+        else
+        {
+            ptr_A = reinterpret_cast<SwappedElementA const*>(args.ptr_B);
+            ptr_B = reinterpret_cast<SwappedElementB const*>(args.ptr_A);
+            dA    = args.dB;
+            dB    = args.dA;
+        }
+
+        Tensor                 tensor_a   = make_tensor(detail::get_logical_ptr(ptr_A),
                                       detail::get_gmem_layout(make_shape(M, K, L), dA));
-        Tensor tensor_b = make_tensor(detail::get_logical_ptr(ptr_B),
+        Tensor                 tensor_b   = make_tensor(detail::get_logical_ptr(ptr_B),
                                       detail::get_gmem_layout(make_shape(N, K, L), dB));
-
         typename Params::TMA_A tma_load_a = make_tma_copy_A_sm90<TmaElementA>(
             GmemTiledCopyA{},
             tensor_a,
@@ -399,10 +416,23 @@ public:
             ClusterShape{});   // mcast along M mode for this N load, if any
 
         typename Params::TMA_Scale tma_load_scale{};
+        typename Params::TMA_Zero  tma_load_zero{};
 
         uint32_t tma_transaction_bytes = TmaTransactionBytesMK + TmaTransactionBytesNK;
-
-        // NOTE(Alan): has scales
+        if constexpr (KernelConversionMode == ConversionMode::DirectConvert)
+        {
+            return {tma_load_a,
+                    tma_load_b,
+                    tma_load_scale,
+                    tma_load_zero,
+                    0,
+                    0,
+                    tma_transaction_bytes,
+                    1,
+                    dA,
+                    dB};
+        }
+        else if constexpr (ModeHasScales)
         {
             auto                scale_k      = ceil_div(K, args.group_size);
             ElementScale const* ptr_S        = args.ptr_S;
@@ -416,15 +446,49 @@ public:
                 ScaleTileShape{},
                 _1{});   // mcast along N mode for this M load, if any
 
-            return {tma_load_a,
-                    tma_load_b,
-                    tma_load_scale,
-                    scale_k,
-                    args.group_size,
-                    tma_transaction_bytes + TmaTransactionBytesExtra,
-                    (args.group_size + size<2>(TileShape{}) - 1) / size<2>(TileShape{}),
-                    dA,
-                    dB};
+            if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale)
+            {
+                return {tma_load_a,
+                        tma_load_b,
+                        tma_load_scale,
+                        tma_load_zero,
+                        scale_k,
+                        args.group_size,
+                        tma_transaction_bytes + TmaTransactionBytesExtra,
+                        (args.group_size + size<2>(TileShape{}) - 1) / size<2>(TileShape{}),
+                        dA,
+                        dB};
+            }
+            else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero)
+            {
+                Tensor tensor_zero = make_tensor(detail::get_logical_ptr(args.ptr_Z),
+                                                 make_layout(make_shape(M, scale_k, L), dS));
+                tma_load_zero      = make_tma_copy(GmemTiledCopyScale{},
+                                              tensor_zero,
+                                              SmemLayoutScale{}(_, _, cute::Int<0>{}),
+                                              ScaleTileShape{},
+                                              _1{});   // mcast along N mode for this M load, if any
+                return {tma_load_a,
+                        tma_load_b,
+                        tma_load_scale,
+                        tma_load_zero,
+                        scale_k,
+                        args.group_size,
+                        tma_transaction_bytes + TmaTransactionBytesExtra,
+                        (args.group_size + size<2>(TileShape{}) - 1) / size<2>(TileShape{}),
+                        dA,
+                        dB};
+            }
+            else
+            {
+                static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                              "Conversion mode not handled in to_underlying_arguments.");
+            }
+        }
+        else
+        {
+            static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                          "Conversion mode not handled in to_underlying_arguments.");
         }
     }
 
@@ -450,9 +514,14 @@ public:
         bool check_aligned_Z = true;
         bool check_mode_args = true;
 
-        // NOTE(Alan): has scales
+        if constexpr (KernelConversionMode == ConversionMode::DirectConvert)
         {
-            const int scale_mn = M;
+            check_mode_args = check_mode_args && (args.ptr_S == nullptr);
+            check_mode_args = check_mode_args && (args.ptr_Z == nullptr);
+        }
+        else if constexpr (ModeHasScales)
+        {
+            const int scale_mn = SwapAB ? N : M;
             const int scale_k  = ceil_div(K, args.group_size);
             constexpr int
                 min_tma_aligned_elements_scale = tma_alignment_bits /
@@ -464,6 +533,31 @@ public:
                                                   ((args.group_size % size<2>(TileShape{})) == 0));
             check_mode_args = check_mode_args && args.group_size != 0;
             check_mode_args = check_mode_args && (args.ptr_S != nullptr);
+
+            if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale)
+            {
+                check_mode_args = check_mode_args && (args.ptr_Z == nullptr);
+            }
+            else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero)
+            {
+                constexpr int
+                    min_tma_aligned_elements_zero = tma_alignment_bits /
+                                                    cutlass::sizeof_bits<ElementZero>::value;
+                check_aligned_Z = cutlass::detail::check_alignment<min_tma_aligned_elements_zero>(
+                    cute::make_shape(scale_mn, scale_k, L),
+                    args.dS);
+                check_mode_args = check_mode_args && (args.ptr_Z != nullptr);
+            }
+            else
+            {
+                static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                              "Conversion mode not handled in can_implement.");
+            }
+        }
+        else
+        {
+            static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                          "Conversion mode not handled in can_implement.");
         }
 
         if (!check_mode_args)
@@ -511,7 +605,24 @@ public:
         cute::prefetch_tma_descriptor(mainloop_params.tma_load_a.get_tma_descriptor());
         cute::prefetch_tma_descriptor(mainloop_params.tma_load_b.get_tma_descriptor());
 
-        cute::prefetch_tma_descriptor(mainloop_params.tma_load_scale.get_tma_descriptor());
+        if constexpr (KernelConversionMode == ConversionMode::DirectConvert)
+        {
+            // Nothing extra to do
+        }
+        else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale)
+        {
+            cute::prefetch_tma_descriptor(mainloop_params.tma_load_scale.get_tma_descriptor());
+        }
+        else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero)
+        {
+            cute::prefetch_tma_descriptor(mainloop_params.tma_load_scale.get_tma_descriptor());
+            cute::prefetch_tma_descriptor(mainloop_params.tma_load_zero.get_tma_descriptor());
+        }
+        else
+        {
+            static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                          "Conversion mode not handled in TMA prefetch.");
+        }
     }
 
     /// Set up the data needed by this collective for load and mma.
@@ -545,7 +656,11 @@ public:
                                    make_coord(_, _, _),
                                    Step<X, _1, _1>{});   // (BLK_N,BLK_K,n,k,l)
 
-        // else if constexpr (ModeHasScales)
+        if constexpr (KernelConversionMode == ConversionMode::DirectConvert)
+        {
+            return cute::make_tuple(gA_mkl, gB_nkl);
+        }
+        else if constexpr (ModeHasScales)
         {
             auto   scale_k = mainloop_params.scale_k;
             Tensor mS_mkl  = mainloop_params.tma_load_scale.get_tma_tensor(
@@ -553,8 +668,29 @@ public:
             Tensor gS_mkl = local_tile(mS_mkl,
                                        ScaleTileShape{},
                                        make_coord(_, _));   // (BLK_M,BLK_Scale_K,m,scale_k,l)
-
-            return cute::make_tuple(gA_mkl, gB_nkl, gS_mkl);
+            if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale)
+            {
+                return cute::make_tuple(gA_mkl, gB_nkl, gS_mkl);
+            }
+            else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero)
+            {
+                Tensor mZ_mkl = mainloop_params.tma_load_zero.get_tma_tensor(
+                    make_shape(M, scale_k, L));   // (m,scale_k,l)
+                Tensor gZ_mkl = local_tile(mZ_mkl,
+                                           ScaleTileShape{},
+                                           make_coord(_, _));   // (BLK_M,BLK_Scale_K,m,scale_k,l)
+                return cute::make_tuple(gA_mkl, gB_nkl, gS_mkl, gZ_mkl);
+            }
+            else
+            {
+                static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                              "Conversion mode not handled in load_init.");
+            }
+        }
+        else
+        {
+            static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                          "Conversion mode not handled in load_init.");
         }
     }
 
@@ -573,7 +709,23 @@ public:
                              uint32_t                  block_rank_in_cluster,
                              TensorStorage&            shared_tensors)
     {
-        static_assert(sizeof...(Ts) == 3, "Scaled convert needs three inputs");
+        if constexpr (KernelConversionMode == ConversionMode::DirectConvert)
+        {
+            static_assert(sizeof...(Ts) == 2, "Direct convert needs two inputs");
+        }
+        else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale)
+        {
+            static_assert(sizeof...(Ts) == 3, "Scaled convert needs three inputs");
+        }
+        else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero)
+        {
+            static_assert(sizeof...(Ts) == 4, "Scaled and zero convert needs four inputs");
+        }
+        else
+        {
+            static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                          "Conversion mode not handled in TMA load.");
+        }
 
         Tensor sA_ = make_tensor(make_smem_ptr(shared_tensors.smem_A.begin()),
                                  SmemLayoutA{});   // (BLK_M,BLK_K,PIPE)
@@ -668,7 +820,11 @@ public:
                      tBsB(_, _, _, write_stage));
             }
 
-            // else if constexpr (ModeHasScales)
+            if constexpr (KernelConversionMode == ConversionMode::DirectConvert)
+            {
+                // Nothing extra to do.
+            }
+            else if constexpr (ModeHasScales)
             {
                 auto tSgS = get<0>(extra_input_partitions);
                 auto tSsS = get<1>(extra_input_partitions);
@@ -684,6 +840,30 @@ public:
                     copy(mainloop_params.tma_load_scale.with(*tma_barrier, mcast_mask_s),
                          tSgS(_, _, _, scale_load_k),
                          tSsS(_, _, _, write_stage));
+
+                if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale)
+                {
+                    // Nothing extra to do
+                }
+                else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero)
+                {
+                    auto tZgZ = get<2>(extra_input_partitions);
+                    auto tZsZ = get<3>(extra_input_partitions);
+                    if (cute::elect_one_sync())
+                        copy(mainloop_params.tma_load_zero.with(*tma_barrier, mcast_mask_s),
+                             tZgZ(_, _, _, scale_load_k),
+                             tZsZ(_, _, _, write_stage));
+                }
+                else
+                {
+                    static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                                  "Conversion mode not handled for TMA copy op.");
+                }
+            }
+            else
+            {
+                static_assert(cutlass::detail::dependent_false<KernelSchedule>,
+                              "Conversion mode not handled for TMA copy op.");
             }
 
             ++k_tile_iter;
@@ -723,13 +903,15 @@ public:
         static_assert(is_rmem<FrgTensorC>::value, "C tensor must be rmem resident.");
         static_assert(cute::rank(SmemLayoutA{}) == 3, "Smem layout must be rank 3.");
         static_assert(cute::rank(SmemLayoutB{}) == 3, "Smem layout must be rank 3.");
-        static_assert(cute::rank(SmemLayoutAtomA{}) == 2, "SmemLayoutAtomA must be rank 2.");
-        static_assert(cute::rank(SmemLayoutAtomB{}) == 2, "SmemLayoutAtomB must be rank 2.");
+        static_assert(cute::rank(SwappedSmemLayoutAtomA{}) == 2,
+                      "SwappedSmemLayoutAtomA must be rank 2.");
+        static_assert(cute::rank(SwappedSmemLayoutAtomB{}) == 2,
+                      "SwappedSmemLayoutAtomB must be rank 2.");
         static_assert(
-            !cute::is_void_v<SmemCopyAtomA>,
+            !cute::is_void_v<SwappedSmemCopyAtomA>,
             "SM90 GMMA mainloops must specify a non-void copy atom for RF sourced instructions.");
         static_assert(
-            cute::is_void_v<SmemCopyAtomB>,
+            cute::is_void_v<SwappedSmemCopyAtomB>,
             "SM90 GMMA mainloops cannot have a non-void copy atom for smem sourced instructions.");
 
         // Obtain warp index
@@ -770,16 +952,16 @@ public:
             sA(_, _, Int<0>{}));   // (MMA,MMA_M,MMA_K,PIPE)
 
         Tensor tCrA_load = [&] {
-            if constexpr (not is_layout<StrideA>::value)
+            if constexpr (not is_layout<SwappedStrideA>::value)
             {
                 // Make register tensor with MMA layout
-                return make_fragment_like<ElementA>(tCrA_mma);
+                return make_fragment_like<RealSwappedElementA>(tCrA_mma);
             }
             else
             {
                 // Make register tensor matching smem layout, converter will take care of
                 // de-swizzling
-                return make_tensor_like<ElementA>(tCsA(_, _, _, Int<0>{}));
+                return make_tensor_like<RealSwappedElementA>(tCsA(_, _, _, Int<0>{}));
             }
         }();
 
@@ -789,7 +971,7 @@ public:
         //
         // Copy Atom A retiling
         //
-        auto smem_tiled_copy_A = make_tiled_copy_A(SmemCopyAtomA{}, tiled_mma);
+        auto smem_tiled_copy_A = make_tiled_copy_A(SwappedSmemCopyAtomA{}, tiled_mma);
         auto smem_thr_copy_A   = smem_tiled_copy_A.get_thread_slice(warp_group_thread_idx);
 
         Tensor tCrA_copy_view = smem_thr_copy_A.retile_D(tCrA_load);   // (CPY,CPY_M,CPY_K)
@@ -1085,8 +1267,4 @@ public:
     }
 };
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-}   // namespace cutlass::gemm::collective
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
+}   // namespace cutlass_w4a8
