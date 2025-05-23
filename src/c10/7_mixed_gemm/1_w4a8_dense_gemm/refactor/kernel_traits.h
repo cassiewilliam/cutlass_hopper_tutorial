@@ -146,8 +146,6 @@ struct MixedInputGemmKernelTraits
     using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
     using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 
-    
-
     static constexpr int PipelineStages = cutlass::gemm::collective::detail::
     compute_stage_count_or_override_single_affine_transformed_input_no_zero<
         cutlass::gemm::collective::detail::sm90_smem_capacity_bytes,

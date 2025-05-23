@@ -135,6 +135,7 @@
 #include "dispatch_policy_extra.hpp"
 #include "gemm_universal_adapter_x.h"
 #include "helper.h"
+#include "kernel_traits.h"
 #include "mainloop_sm90_tma_gmma_ws_x.hpp"
 #include "mixed_dtype_utils.hpp"
 #include "sm90_epilogue_tma_warpspecialized_x.hpp"
@@ -209,11 +210,11 @@ using ClusterShape   = Shape<_1, _1, _1>;   // Shape of the threadblocks in a cl
 using KernelSchedule = cutlass::gemm::
     KernelTmaWarpSpecializedCooperativeX;   // Kernel to launch based on the default setting in the
                                            // Collective Builder
-using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
+using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperativeX;
 using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 
 // TODO(Alan): support later
-// using FusionOperation = cutlass::epilogue::fusion::ScaledAcc<ElementD, ElementCompute>;
+using FusionOperation = cutlass::epilogue::fusion::ScaledAcc<ElementD, ElementCompute>;
 
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     cutlass::arch::Sm90,
@@ -232,60 +233,24 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     ElementD,
     typename cutlass::layout::LayoutTranspose<LayoutD>::type,
     AlignmentD,
-    EpilogueSchedule   // This is the only epi supporting the required swap + transpose.
-    >::CollectiveOp;
+    EpilogueSchedule,   // This is the only epi supporting the required swap + transpose.
+    FusionOperation>::CollectiveOp;
 
-// =========================================================== MIXED INPUT WITH SCALES
-// =========================================================================== The Scale information
-// must get paired with the operand that will be scaled. In this example, B is scaled so we make a
-// tuple of B's information and the scale information.
-using CollectiveMainloopScaleOnly = typename cutlass::gemm::collective::CollectiveBuilder<
-    ArchTag,
-    OperatorClass,
-    cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
-    LayoutB_Transpose,
-    AlignmentB,
-    ElementA,
-    LayoutA_Transpose,
-    AlignmentA,
-    ElementAccumulator,
-    TileShape,
-    ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-        sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    KernelSchedule>::CollectiveOp;
+using KernelTraits = typename cutlass_w4a8::MixedInputGemmKernelTraits<ElementD,
+                                                                       CollectiveEpilogue>;
 
-using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,   // Indicates ProblemShape
-    CollectiveMainloopScaleOnly,
-    CollectiveEpilogue>;
-
-using CollectiveMainloopShuffled = typename cutlass::gemm::collective::CollectiveBuilder<
-    ArchTag,
-    OperatorClass,
-    cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
-    LayoutB_Reordered,
-    AlignmentB,
-    ElementA,
-    LayoutA_Transpose,
-    AlignmentA,
-    ElementAccumulator,
-    TileShape,
-    ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-        sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    KernelSchedule>::CollectiveOp;
+using CollectiveMainloopShuffled = typename cutlass::gemm::collective::CollectiveMainloop<
+    KernelTraits>;
 
 using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
     Shape<int, int, int, int>,   // Indicates ProblemShape
     CollectiveMainloopShuffled,
     CollectiveEpilogue>;
 
-using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapterX<GemmKernelScaleOnly>;
 using GemmShuffled  = cutlass::gemm::device::GemmUniversalAdapterX<GemmKernelShuffled>;
 
-using StrideC = typename GemmKernelScaleOnly::StrideC;
-using StrideD = typename GemmKernelScaleOnly::StrideD;
+using StrideC = typename CollectiveEpilogue::StrideC;
+using StrideD = typename CollectiveEpilogue::StrideD;
 
 using StrideC_ref = cutlass::detail::TagToStrideC_t<LayoutC>;
 using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
@@ -305,7 +270,7 @@ uint64_t    seed;
 
 LayoutB_Reordered layout_B_reordered;
 
-using StrideS     = typename CollectiveMainloopScaleOnly::StrideScale;
+using StrideS     = typename CollectiveMainloopShuffled::StrideScale;
 using StrideS_ref = cutlass::detail::TagToStrideB_t<LayoutScale>;
 StrideS     stride_S;
 StrideS_ref stride_S_ref;
@@ -318,8 +283,8 @@ cutlass::DeviceAllocation<ElementScale>                    block_scale;
 cutlass::DeviceAllocation<cutlass::Array<ElementScale, 8>> block_scale_packed;
 cutlass::DeviceAllocation<ElementZero>                     block_zero;
 cutlass::DeviceAllocation<ElementC>                        block_C;
-cutlass::DeviceAllocation<typename GemmScaleOnly::EpilogueOutputOp::ElementOutput> block_D;
-cutlass::DeviceAllocation<typename GemmScaleOnly::EpilogueOutputOp::ElementOutput> block_ref_D;
+cutlass::DeviceAllocation<typename GemmShuffled::EpilogueOutputOp::ElementOutput> block_D;
+cutlass::DeviceAllocation<typename GemmShuffled::EpilogueOutputOp::ElementOutput> block_ref_D;
 
 #endif   // defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
 
@@ -678,16 +643,9 @@ int main(int argc, char const** args)
     {
         std::cout << "Running in group scale mode." << std::endl;
     }
-    if (options.shuffle)
-    {
-        std::cout << "Offline shuffle enabled." << std::endl;
-        run<GemmShuffled>(options);
-    }
-    else
-    {
-        std::cout << "Offline shuffle disabled." << std::endl;
-        run<GemmScaleOnly>(options);
-    }
+
+    std::cout << "Offline shuffle enabled." << std::endl;
+    run<GemmShuffled>(options);
 #endif
 
     return 0;

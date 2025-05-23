@@ -6,277 +6,147 @@
 #include "dispatch_policy_extra.hpp"
 #include "mainloop_sm90_tma_gmma_ws_x.hpp"
 
-namespace cutlass::gemm::collective {
+namespace cutlass::epilogue::fusion {
 
-
-namespace detail {
-// Returns the maximum number of smem tiles that can be used with a given smem capacity (with an
-// optional scale matrix), or overrides with manual count.
-template<int capacity_bytes_,
-         class ElementA,
-         class ElementB,
-         class ElementScale,
-         class TileShapeMNK,
-         int carveout_bytes_,
-         int alignment = 128>
-constexpr int compute_stage_count_or_override_single_affine_transformed_input_no_zero(
-    StageCountAutoCarveout<carveout_bytes_> stage_count)
+// D = alpha * acc
+template<int  StagesC,
+         int  StagesD,
+         int  FragmentSize,
+         bool ReuseSmemC,
+         bool DelayTmaStore,
+         class ElementOutput,
+         class ElementCompute,
+         class ElementScalar,
+         FloatRoundStyle RoundStyle,
+         class CtaTileShapeMNK,
+         class EpilogueTile>
+struct FusionCallbacks<
+    epilogue::Sm90TmaWarpSpecializedX<StagesC, StagesD, FragmentSize, ReuseSmemC, DelayTmaStore>,
+    fusion::ScaledAcc<ElementOutput, ElementCompute, ElementScalar, RoundStyle>,
+    CtaTileShapeMNK,
+    EpilogueTile> : Sm90EVT<Sm90Compute<multiplies, ElementOutput, ElementCompute, RoundStyle>,
+                            Sm90ScalarBroadcast<ElementScalar, Stride<_0, _0, int64_t>>,
+                            Sm90AccFetch>
 {
+    using Impl = Sm90EVT<Sm90Compute<multiplies, ElementOutput, ElementCompute, RoundStyle>,
+                         Sm90ScalarBroadcast<ElementScalar, Stride<_0, _0, int64_t>>,
+                         Sm90AccFetch>;
 
-    // 32 bytes to account for barriers etc.
-    constexpr auto mainloop_pipeline_bytes = sizeof(
-        typename cutlass::PipelineTmaAsync<1>::SharedStorage);
-    constexpr int scale_zero_k_tile = 1;
+    using Operation = fusion::ScaledAcc<ElementOutput, ElementCompute, ElementScalar, RoundStyle>;
 
-    constexpr auto a_bits = cute::sizeof_bits_v<ElementA>;
-    constexpr auto b_bits = cute::sizeof_bits_v<ElementB>;
-
-    constexpr auto s_bits = get_bits_for_possibly_void_element<ElementScale>();
-
-    constexpr auto scale_bytes = cutlass::bits_to_bytes(s_bits * size<0>(TileShapeMNK{}) *
-                                                        scale_zero_k_tile);
-
-    static_assert(scale_bytes % 128 == 0, "Scale bytes must be a multiple of 128");
-
-    // When scales are void, s_bits will be 0 so no smem will be allocated for scales.
-    constexpr int stage_bytes_ = cutlass::bits_to_bytes(a_bits * size<0>(TileShapeMNK{}) *
-                                                        size<2>(TileShapeMNK{})) +
-                                 cutlass::bits_to_bytes(b_bits * size<1>(TileShapeMNK{}) *
-                                                        size<2>(TileShapeMNK{})) +
-                                 scale_bytes;
-
-    constexpr int stage_bytes = cutlass::round_up(stage_bytes_, alignment) +
-                                static_cast<int>(mainloop_pipeline_bytes);
-
-    constexpr int carveout_bytes = cutlass::round_up(carveout_bytes_, alignment);
-    constexpr int capacity_bytes = capacity_bytes_ / alignment * alignment;
-
-    return (capacity_bytes - carveout_bytes) / stage_bytes;
-}
-}   // namespace detail
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-// GMMA_TMA_WS_RS
-template<class ElementA_,
-         class GmemLayoutATag_,
-         int AlignmentA,
-         class ElementB_,
-         class GmemLayoutBTag_,
-         int AlignmentB,
-         class ElementAccumulator,
-         class TileShape_MNK,
-         class ClusterShape_MNK,
-         class StageCountType,
-         class KernelScheduleType>
-struct CollectiveBuilder<
-    arch::Sm90,
-    arch::OpClassTensorOp,
-    ElementA_,
-    GmemLayoutATag_,
-    AlignmentA,
-    ElementB_,
-    GmemLayoutBTag_,
-    AlignmentB,
-    ElementAccumulator,
-    TileShape_MNK,
-    ClusterShape_MNK,
-    StageCountType,
-    KernelScheduleType,
-    cute::enable_if_t<
-        (cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedCooperativeX>) &&
-        (detail::is_use_rmem_A<ElementA_, GmemLayoutATag_, ElementB_, GmemLayoutBTag_>() ||
-         // ConvertAndScale and ConvertAndScaleWithZero
-         cute::is_tuple<ElementA_>::value || cute::is_tuple<ElementB_>::value ||
-         // DirectConvert
-         sizeof_bits<ElementA_>::value != sizeof_bits<ElementB_>::value)>>
-{
-
-private:
-    using ScaleA = detail::deduce_mixed_width_dtype_t<1, ElementA_>;
-
-public:
-    // ElementA is uint4b_t
-    // ElementB is float_e4m3_t
-    using ElementA = detail::deduce_mixed_width_dtype_t<0, ElementA_>;
-    using ElementB = detail::deduce_mixed_width_dtype_t<0, ElementB_>;
-
-    template<class T>
-    static auto get_stride(T const& t)
+    struct Arguments
     {
-        if constexpr (not cute::is_layout<cute::remove_pointer_t<T>>::value)
+        // Give a name and flat ordering to the fusion callback args
+        ElementScalar        alpha     = ElementScalar(1);
+        ElementScalar        beta      = ElementScalar(0);
+        ElementScalar const* alpha_ptr = nullptr;
+        ElementScalar const* beta_ptr  = nullptr;
+
+        using StrideAlpha  = Stride<_0, _0, int64_t>;
+        StrideAlpha dAlpha = {_0{}, _0{}, 0};
+
+        // Conversion to the args expected by the visitor implementation
+        // to_underlying_arguments will implicitly call this
+        operator typename Impl::Arguments() const
         {
-            return t;
+            return {
+                // binary op : alpha * acc
+                {{alpha}, {alpha_ptr}, {dAlpha}},   // leaf args : alpha
+                {},                                 // leaf args : acc
+                {}                                  // binary args : multiplies
+            };   // end binary op
         }
-        else
-        {
-            if constexpr (cute::is_pointer_v<T>)
-            {
-                return &cute::stride(*t);
-            }
-            else
-            {
-                return cute::stride(t);
-            }
-        }
-    }
+    };
 
-    using GmemLayoutATag = decltype(get_stride(GmemLayoutATag_{}));
-    using GmemLayoutBTag = decltype(get_stride(GmemLayoutBTag_{}));
-
-    using ElementPairA = ElementA_;
-    using ElementPairB = ElementB_;
-
-    using ElementScale = ScaleA;
-
-    static_assert(is_static<TileShape_MNK>::value);
-    static_assert(is_static<ClusterShape_MNK>::value);
-    static_assert(
-        detail::
-            is_aligned<ElementA, AlignmentA, ElementB, AlignmentB, detail::tma_alignment_bytes>(),
-        "Should meet TMA alignment requirement\n");
-#ifndef CUTLASS_SM90_COLLECTIVE_BUILDER_SUPPORTED
-    static_assert(cutlass::detail::dependent_false<ElementA>,
-                  "Unsupported Toolkit for SM90 Collective Builder\n");
-#endif
-    static constexpr cute::GMMA::Major
-        GmmaMajorA = detail::gmma_rs_tag_to_major_A<GmemLayoutATag>();
-    static constexpr cute::GMMA::Major
-        GmmaMajorB = detail::gmma_rs_tag_to_major_B<GmemLayoutBTag>();
-    // If A is scaled, then we don't need to swap. Otherwise, we must ensure B goes to rmem and we
-    // must swap the operands.
-    static constexpr bool IsWarpSpecializedTransposeB = false;
-
-    // When we relax the above assertion, we must handle setting the tile mma GmmaMajorB correctly.
-    static constexpr cute::GMMA::Major TiledMmaGmmaMajorB = GmmaMajorB;
-
-    // For fp32 types, map to tf32 MMA value type.
-    using ElementAMma = ElementA;
-    using ElementBMma = ElementB;
-
-    // Handle mixed dtypes and MMA.
-    using RealElementA    = ElementA;
-    using RealElementB    = ElementB;
-
-    using RealElementAMma = ElementB;
-    // Always the same for element B.
-    using RealElementBMma = ElementB;
-
-    static_assert(TiledMmaGmmaMajorB == GMMA::Major::K || sizeof_bits<ElementB>::value == 16,
-                  "Mixed input GEMM does not support MN major layout except for 16bit");
-
-    using AtomLayoutMNK = cute::conditional_t<
-        cute::is_any_of_v<KernelScheduleType,
-                          KernelTmaWarpSpecializedCooperativeX,
-                          KernelPtrArrayTmaWarpSpecializedCooperative>,
-        Layout<Shape<_2, _1, _1>>,
-        Layout<Shape<_1, _1, _1>>>;
-
-
-    // ElementB is float8_e4m3_t
-    // ElementAccumulator is float
-    using TiledMma = decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<RealElementAMma,
-                                                                              RealElementBMma,
-                                                                              ElementAccumulator,
-                                                                              TileShape_MNK,
-                                                                              GMMA::Major::K,
-                                                                              GMMA::Major::K>(),
-                                                   AtomLayoutMNK{}));
-
-    using GmemTiledCopyA = decltype(detail::sm90_cluster_shape_to_tma_atom(
-        shape<1>(ClusterShape_MNK{})));
-
-    using GmemTiledCopyB = decltype(detail::sm90_cluster_shape_to_tma_atom(
-        shape<0>(ClusterShape_MNK{})));
-
-    using SmemLayoutAtomA = decltype(detail::rs_smem_selector<
-                                     GmmaMajorA,
-                                     ElementAMma,
-                                     decltype(cute::get<0>(TileShape_MNK{})),
-                                     decltype(cute::get<2>(TileShape_MNK{})),
-                                     IsWarpSpecializedTransposeB>());
-    using SmemLayoutAtomB = decltype(detail::rs_smem_selector<
-                                     GmmaMajorB,
-                                     ElementBMma,
-                                     decltype(cute::get<1>(TileShape_MNK{})),
-                                     decltype(cute::get<2>(TileShape_MNK{})),
-                                     IsWarpSpecializedTransposeB>());
-
-    static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(
-        SmemLayoutAtomA{});
-    static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(
-        SmemLayoutAtomB{});
-    static constexpr int SmemAlignment = static_cast<int>(
-        cute::max(SmemAlignmentA, SmemAlignmentB));
-
-    // Handle mixed dtype array GEMM's size of tensor map storage.
-    static constexpr size_t TensorMapStorage = sizeof(cute::TmaDescriptor) * 4;
-
-    static constexpr size_t
-        SchedulerPipelineStorage = cute::is_pointer_v<TagToStrideA_t<GmemLayoutATag_>>
-                                       ? sizeof(
-                                             cutlass::PipelineDetail::PipelineAsyncSharedStorage<8>)
-                                       : 0;
-
-    static constexpr int KernelSmemCarveout = static_cast<int>(TensorMapStorage +
-                                                               SchedulerPipelineStorage);
-
-    static constexpr int Sm90ReducedSmemCapacityBytes = detail::sm90_smem_capacity_bytes -
-                                                        KernelSmemCarveout;
-
-    static constexpr int PipelineStages = detail::
-        compute_stage_count_or_override_single_affine_transformed_input_no_zero<
-            detail::sm90_smem_capacity_bytes,
-            RealElementA,
-            RealElementB,
-            ElementScale,
-            TileShape_MNK,
-            StageCountType::bytes,
-            SmemAlignment>(StageCountType{});
-
-    using SmemCopyAtomA = Copy_Atom<cute::AutoVectorizingCopy, ElementA>;
-    using SmemCopyAtomB = void;
-
-    // We pack the scale data with the operand that will be optionally scaled and converted before
-    // MMA.
-    using StrideA = cute::conditional_t<
-        cute::is_layout<cute::remove_pointer_t<GmemLayoutATag_>>::value,
-        GmemLayoutATag_,
-        TagToStrideA_t<GmemLayoutATag>>;
-    using StrideB = cute::conditional_t<
-        cute::is_layout<cute::remove_pointer_t<GmemLayoutBTag_>>::value,
-        GmemLayoutBTag_,
-        TagToStrideB_t<GmemLayoutBTag>>;
-
-    using CollectiveOp = CollectiveMainloop<PipelineStages,
-                                            ClusterShape_MNK,
-                                            KernelScheduleType,
-                                            TileShape_MNK,
-                                            ElementPairA,
-                                            StrideA,
-                                            ElementPairB,
-                                            StrideB,
-                                            TiledMma,
-                                            GmemTiledCopyA,
-                                            SmemLayoutAtomA,
-                                            SmemCopyAtomA,
-                                            cute::identity,
-                                            GmemTiledCopyB,
-                                            SmemLayoutAtomB,
-                                            SmemCopyAtomB,
-                                            cute::identity>;
-
-    static_assert(SmemAlignment == static_cast<int>(cute::max(CollectiveOp::SmemAlignmentA,
-                                                              CollectiveOp::SmemAlignmentB)));
+    // Ctor inheritance
+    using Impl::Impl;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-}   // namespace cutlass::gemm::collective
+
+}   // namespace cutlass::epilogue::fusion
 
 
 namespace cutlass::epilogue::collective {
 
 namespace detail {
+
+
+// Attempts to compute a reasonable epilogue tile based on block tile shape or allows the user to
+// provide one.
+template<class ElementD, class EpilogueTileType, class Schedule, class TileShape_MNK>
+constexpr auto sm90_compute_tile_shape_or_override_x()
+{
+    if constexpr (cute::is_same_v<EpilogueTileType, EpilogueTileAuto>)
+    {
+        auto epi_tile = [&]() {
+            if constexpr (cute::is_base_of_v<cutlass::epilogue::TmaWarpSpecializedCooperativeX,
+                                             Schedule>)
+            {
+                auto tile_m = cute::min(_128{}, size<0>(TileShape_MNK{}));
+                auto tile_n = cute::gcd(cute::min(_32{}, size<1>(TileShape_MNK{})),
+                                        size<1>(TileShape_MNK{}));
+                return make_shape(tile_m, tile_n);
+            }
+            else if constexpr (detail::sm90_is_warp_specialized_v<Schedule>)
+            {
+                constexpr int N_perf = sizeof_bits_v<ElementD> == 8 ? 64 : 32;
+                auto          tile_m = cute::min(_64{}, size<0>(TileShape_MNK{}));
+                auto          tile_n = cute::gcd(cute::min(Int<N_perf>{}, size<1>(TileShape_MNK{})),
+                                        size<1>(TileShape_MNK{}));
+                return make_shape(tile_m, tile_n);
+            }
+            else
+            {
+                static_assert(cutlass::detail::dependent_false<Schedule>, "Unsupported schedule.");
+            }
+        }();
+
+        return cute::transform(epi_tile, seq<0, 1>{}, [](auto epi_tiler, auto I) {
+            auto cta_tiler = make_layout(get<I>(TileShape_MNK{}));
+            // This is a multimodal CTA tiler, transform before returning
+            if constexpr (depth(cta_tiler) > 0)
+            {
+                // This is an implicit multimodal tiler, match profile and return
+                if constexpr (tuple_size_v<decltype(shape(cta_tiler))> == 1)
+                {
+                    return make_tile(epi_tiler);
+                }
+                // This is an explicit multimodal tiler, compose out epi tiler
+                else
+                {
+                    return composition(cta_tiler, epi_tiler);
+                }
+            }
+            // This is a flat CTA tiler, no need for transformation
+            else
+            {
+                return epi_tiler;
+            }
+        });
+    }
+    else if constexpr (cute::is_tuple<EpilogueTileType>::value)
+    {
+        EpilogueTileType epi_tile;
+        constexpr int    M = size<0>(shape(epi_tile));
+        constexpr int    N = size<1>(shape(epi_tile));
+
+        static_assert(!is_layout<EpilogueTileType>::value,
+                      "EpilogueTile must be a cute::Tile or cute::Shape");
+        static_assert(M == 64 && detail::sm90_is_warp_specialized_v<Schedule> ||
+                          M == 128 && detail::sm90_is_cooperative_v<Schedule>,
+                      "Unsupported tile shape");
+        static_assert(N % 16 == 0, "Unsupported tile shape");
+
+        return epi_tile;
+    }
+    else
+    {
+        static_assert(cutlass::detail::dependent_false<EpilogueTileType>,
+                      "Invalid type for EpilogueTileType.");
+    }
+}
 
 // Returns the parameterized dispatch policy for the TMA epilogue
 template<class TileShapeMNK, class EpilogueTileMN, class ElementC, class ElementD, class Schedule>
@@ -285,8 +155,12 @@ constexpr auto sm90_get_tma_dispatch_policy_x()
     using namespace cute;
 
     constexpr int EpiTiles     = size(shape_div(take<0, 2>(TileShapeMNK{}), EpilogueTileMN{}));
-    constexpr int FragmentSize = size(EpilogueTileMN{}) /
-                                 (detail::sm90_is_cooperative_v<Schedule> ? 256 : 128);
+    constexpr int
+        FragmentSize = size(EpilogueTileMN{}) /
+                       (cute::is_base_of_v<cutlass::epilogue::TmaWarpSpecializedCooperativeX,
+                                           Schedule>
+                            ? 256
+                            : 128);
     // 8b residuals load fast and consume little smem, so the perf cost of waiting on stores to
     // finish outweighs the cost of extra allocation
     constexpr bool ReuseSmem = (sizeof_bits_v<ElementC> == sizeof_bits_v<ElementD>) &&
@@ -304,8 +178,6 @@ constexpr auto sm90_get_tma_dispatch_policy_x()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-
-
 // Helper for building TMA warp-specialized collective epilogues, specialized by
 // the fusion operation performed and the dispatch policy to use.
 template<class TileShape_MNK,
@@ -427,10 +299,11 @@ private:
                                          fusion::get_element_aux_t<FusionOperation>,
                                          ElementD_>;
 
-    using EpilogueTile_MN = decltype(detail::sm90_compute_tile_shape_or_override<ElementD,
-                                                                                 EpilogueTileType,
-                                                                                 Schedule,
-                                                                                 TileShape_MNK>());
+    using EpilogueTile_MN = decltype(detail::sm90_compute_tile_shape_or_override_x<
+                                     ElementD,
+                                     EpilogueTileType,
+                                     Schedule,
+                                     TileShape_MNK>());
 
     using DispatchPolicy = decltype(detail::sm90_get_tma_dispatch_policy_x<TileShape_MNK,
                                                                            EpilogueTile_MN,
