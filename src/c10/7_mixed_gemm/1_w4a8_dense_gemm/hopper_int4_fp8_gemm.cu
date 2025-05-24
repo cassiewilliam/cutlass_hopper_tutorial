@@ -252,7 +252,6 @@ using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
 /// Initialization
 StrideA     stride_A;
 StrideB     stride_B;
-StrideC_ref stride_C_ref;
 StrideD     stride_D;
 StrideD_ref stride_D_ref;
 uint64_t    seed;
@@ -341,14 +340,9 @@ void initialize(Options const& options)
                                                 cute::make_shape(options.m, options.k, options.l));
     stride_B          = cutlass::make_cute_packed_stride(StrideB{}, shape_B);
     // Reverse stride here due to swap and transpose
-    stride_C     = cutlass::make_cute_packed_stride(StrideC{},
-                                                cute::make_shape(options.n, options.m, options.l));
-    stride_C_ref = cutlass::make_cute_packed_stride(
-        StrideC_ref{},
-        cute::make_shape(options.m, options.n, options.l));
-    // Reverse stride here due to swap and transpose
     stride_D     = cutlass::make_cute_packed_stride(StrideD{},
                                                 cute::make_shape(options.n, options.m, options.l));
+
     stride_D_ref = cutlass::make_cute_packed_stride(
         StrideD_ref{},
         cute::make_shape(options.m, options.n, options.l));
@@ -357,14 +351,14 @@ void initialize(Options const& options)
 
     auto a_coord = cutlass::make_Coord(options.m * options.l, options.k);
     auto b_coord = cutlass::make_Coord(options.k, options.n * options.l);
-    auto c_coord = cutlass::make_Coord(options.m * options.l, options.n);
+    auto d_coord = cutlass::make_Coord(options.m * options.l, options.n);
 
     block_A.reset(a_coord.product());
     block_B.reset(b_coord.product());
     block_B_modified.reset(b_coord.product());
     block_B_dq.reset(b_coord.product());
-    block_D.reset(c_coord.product());
-    block_ref_D.reset(c_coord.product());
+    block_D.reset(d_coord.product());
+    block_ref_D.reset(d_coord.product());
 
     block_scale.reset(scale_k * options.l * options.n);
     block_scale_packed.reset(scale_k * options.l * options.n);
@@ -402,7 +396,7 @@ void initialize(Options const& options)
         cutlass::reorder_tensor(block_B_modified.get(), layout_B, layout_B_reordered);
 
         print("Quantized tensor layout: ");
-        print(layout_B_reordered);
+        print_layout(layout_B_reordered);
         print("\n");
     }
 }
