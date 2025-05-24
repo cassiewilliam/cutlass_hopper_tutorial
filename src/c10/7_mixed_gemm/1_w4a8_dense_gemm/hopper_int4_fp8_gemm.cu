@@ -186,17 +186,9 @@ using ElementScale = MmaType;
 using ElementZero  = ElementScale;   // only for verify
 using LayoutScale  = cutlass::layout::RowMajor;
 
-// C/D matrix configuration
-using ElementC           = cutlass::half_t;             // Element type for C and D matrix operands
-using LayoutC            = cutlass::layout::RowMajor;   // Layout type for C and D matrix operands
-constexpr int AlignmentC = 128 /
-                           cutlass::sizeof_bits<
-                               ElementC>::value;   // Memory access granularity/alignment of C
-                                                   // matrix in units of elements (up to 16 bytes)
-
 // D matrix configuration
-using ElementD           = ElementC;
-using LayoutD            = LayoutC;
+using ElementD           = cutlass::half_t;
+using LayoutD            = cutlass::layout::RowMajor;
 constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
 // Core kernel configurations
@@ -227,9 +219,9 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     // Transpose layout of D here since we use explicit swap + transpose
     // the void type for C tells the builder to allocate 0 smem for the C matrix.
     // We can enable this if beta == 0 by changing ElementC to void below.
-    ElementC,
-    typename cutlass::layout::LayoutTranspose<LayoutC>::type,
-    AlignmentC,
+    void,
+    typename cutlass::layout::LayoutTranspose<LayoutD>::type,
+    AlignmentD,
     ElementD,
     typename cutlass::layout::LayoutTranspose<LayoutD>::type,
     AlignmentD,
@@ -249,10 +241,8 @@ using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
 
 using GemmShuffled  = cutlass::gemm::device::GemmUniversalAdapterX<GemmKernelShuffled>;
 
-using StrideC = typename CollectiveEpilogue::StrideC;
 using StrideD = typename CollectiveEpilogue::StrideD;
 
-using StrideC_ref = cutlass::detail::TagToStrideC_t<LayoutC>;
 using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
 
 //
@@ -262,7 +252,6 @@ using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
 /// Initialization
 StrideA     stride_A;
 StrideB     stride_B;
-StrideC     stride_C;
 StrideC_ref stride_C_ref;
 StrideD     stride_D;
 StrideD_ref stride_D_ref;
@@ -282,7 +271,6 @@ cutlass::DeviceAllocation<ElementA>                        block_B_dq;
 cutlass::DeviceAllocation<ElementScale>                    block_scale;
 cutlass::DeviceAllocation<cutlass::Array<ElementScale, 8>> block_scale_packed;
 cutlass::DeviceAllocation<ElementZero>                     block_zero;
-cutlass::DeviceAllocation<ElementC>                        block_C;
 cutlass::DeviceAllocation<typename GemmShuffled::EpilogueOutputOp::ElementOutput> block_D;
 cutlass::DeviceAllocation<typename GemmShuffled::EpilogueOutputOp::ElementOutput> block_ref_D;
 
@@ -375,7 +363,6 @@ void initialize(Options const& options)
     block_B.reset(b_coord.product());
     block_B_modified.reset(b_coord.product());
     block_B_dq.reset(b_coord.product());
-    block_C.reset(c_coord.product());
     block_D.reset(c_coord.product());
     block_ref_D.reset(c_coord.product());
 
@@ -386,7 +373,6 @@ void initialize(Options const& options)
     initialize_tensor(block_A, seed + 2022);
     initialize_tensor(block_B, seed + 2021);
     cutlass::unified_encode_int4b(block_B.get(), block_B_modified.get(), block_B.size());
-    initialize_tensor(block_C, seed + 2020);
     initialize_scale(block_scale, options);
     cutlass::pack_scale_fp8(block_scale.get(), block_scale_packed.get(), block_scale.size());
     initialize_zero(block_zero, options);
@@ -455,7 +441,7 @@ typename Gemm::Arguments args_from_options(Options const& options)
                  block_scale_packed.get(),
                  stride_S,
                  options.g},
-                {{options.alpha, options.beta}, block_C.get(), stride_C, block_D.get(), stride_D}};
+                {{options.alpha, options.beta}, nullptr, stride_D, block_D.get(), stride_D}};
 }
 
 bool verify(Options const& options)
@@ -501,9 +487,9 @@ bool verify(Options const& options)
         cutlass::epilogue::collective::EpilogueTileAuto,
         ElementAccumulator,
         ElementAccumulator,
-        ElementC,
-        LayoutC,
-        AlignmentC,
+        void,
+        LayoutD,
+        AlignmentD,
         ElementD,
         LayoutD,
         AlignmentD,
@@ -516,14 +502,11 @@ bool verify(Options const& options)
 
     using GemmRef = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelRef>;
 
-    typename GemmRef::Arguments arguments{cutlass::gemm::GemmUniversalMode::kGemm,
-                                          {options.m, options.n, options.k, options.l},
-                                          {block_A.get(), stride_A, block_B_dq.get(), stride_B},
-                                          {{options.alpha, options.beta},
-                                           block_C.get(),
-                                           stride_C_ref,
-                                           block_ref_D.get(),
-                                           stride_D_ref}};
+    typename GemmRef::Arguments arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {options.m, options.n, options.k, options.l},
+        {block_A.get(), stride_A, block_B_dq.get(), stride_B},
+        {{options.alpha, options.beta}, nullptr, stride_D_ref, block_ref_D.get(), stride_D_ref}};
 
     // Run the gemm where the scaling is performed outside of the kernel.
     GemmRef gemm_ref;
