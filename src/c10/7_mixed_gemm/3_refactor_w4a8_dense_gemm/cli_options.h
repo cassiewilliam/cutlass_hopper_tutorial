@@ -12,6 +12,7 @@ struct Options {
   bool error;
 
   int m, n, k;
+  int g;
   float alpha, beta;
   unsigned seed;
   int timing_iterations;
@@ -24,6 +25,7 @@ struct Options {
     m(8192),
     n(8192),
     k(8192),
+    g(128),
     alpha(1.f),
     beta(0.f),
     seed(0u),
@@ -44,6 +46,7 @@ struct Options {
     cmd.get_cmd_line_argument("m", m, 8192);
     cmd.get_cmd_line_argument("n", n, 8192);
     cmd.get_cmd_line_argument("k", k, 8192);
+    cmd.get_cmd_line_argument("g", g, 128);
     cmd.get_cmd_line_argument("alpha", alpha, 1.f);
     cmd.get_cmd_line_argument("beta", beta, 0.f);
     cmd.get_cmd_line_argument("seed", seed, 0u);
@@ -62,6 +65,7 @@ struct Options {
         << "  --m=<int>                   M mode of problem size (only used with --single)\n"
         << "  --n=<int>                   N mode of problem size (only used with --single)\n"
         << "  --k=<int>                   K mode of problem size (constant across trials)\n"
+        << "  --g=<int>                   Group size for per group scale \n"
         << "  --alpha=<f32>               Epilogue scalar alpha\n"
         << "  --beta=<f32>                Epilogue scalar beta\n\n"
         << "  --seed=<uint>               Set random seed (0: randomize from clock)\n"
