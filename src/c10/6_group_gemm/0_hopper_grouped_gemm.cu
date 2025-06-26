@@ -91,9 +91,9 @@
 
 using namespace cute;
 using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int,int,int>>; // <M,N,K> per group
-using ElementA = cutlass::float_e4m3_t;                                    // Element type for A matrix operand
-using ElementB = cutlass::float_e5m2_t;                                    // Element type for B matrix operand
-using ElementC = cutlass::half_t;                                          // Element type for C and D matrix operands
+using ElementA     = cutlass::half_t;   // Element type for A matrix operand
+using ElementB     = cutlass::half_t;   // Element type for B matrix operand
+using ElementC     = cutlass::half_t;                                          // Element type for C and D matrix operands
 
 #if defined(CUTLASS_ARCH_MMA_MODIFIABLE_TMA_SM90_SUPPORTED)
 
@@ -121,17 +121,17 @@ using StageCountType = cutlass::gemm::collective::StageCountAuto;           // S
 
 // Different configs for pingpong/cooperative
 struct CooperativeConfig {
-  using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeFP8FastAccum;
-  using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
-  using TileShape           = Shape<_256,_128,_128>;
-  using ClusterShape        = Shape<_1,_2,_1>;
+    using KernelSchedule   = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
+    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
+    using TileShape        = Shape<_256, _128, _128>;
+    using ClusterShape     = Shape<_1, _2, _1>;
 };
 
 struct PingpongConfig {
-  using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongFP8FastAccum;
-  using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-  using TileShape           = Shape<_128,_128,_128>;
-  using ClusterShape        = Shape<_2,_1,_1>;
+    using KernelSchedule   = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
+    using TileShape        = Shape<_128, _128, _128>;
+    using ClusterShape     = Shape<_2, _1, _1>;
 };
 
 template <typename ScheduleConfig>
