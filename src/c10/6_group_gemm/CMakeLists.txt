@@ -9,6 +9,9 @@ include_directories(
 )
 remove_definitions(-DTORCH_CUDA=1)
 
+find_package(CUDA REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+
 add_executable(c1060_test_hopper_grouped_gemm 0_hopper_grouped_gemm.cu)
 
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
@@ -22,4 +25,4 @@ else()
 endif()
 
 target_include_directories(c1060_test_hopper_grouped_gemm PRIVATE ${CUTLASS_HEADER_DIR} ${CUTLASS_TOOLS_HEAD_DIR} ${COMMON_HEADER_DIR})
-target_link_libraries(c1060_test_hopper_grouped_gemm PRIVATE nvidia::cutlass::cutlass)
+target_link_libraries(c1060_test_hopper_grouped_gemm PRIVATE nvidia::cutlass::cutlass CUDA::cudart CUDA::cublas)

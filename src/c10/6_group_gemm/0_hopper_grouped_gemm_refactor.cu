@@ -59,14 +59,11 @@
         5 1024x512x128 and so on
 */
 
-#include <cfloat>
-#include <cublasLt.h>
-#include <cublas_v2.h>
-#include <cuda.h>
-#include <fstream>
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <vector>
+#include <cfloat>
 
 #include "cutlass/cutlass.h"
 
@@ -92,94 +89,7 @@
 
 #include "helper.h"
 
-using namespace cute;
-using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int,int,int>>; // <M,N,K> per group
-using ElementA     = cutlass::half_t;   // Element type for A matrix operand
-using ElementB     = cutlass::half_t;   // Element type for B matrix operand
-using ElementC     = cutlass::half_t;                                          // Element type for C and D matrix operands
 
-#if defined(CUTLASS_ARCH_MMA_MODIFIABLE_TMA_SM90_SUPPORTED)
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
-/// GEMM kernel configurations
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-// A matrix configuration
-using         LayoutA     = cutlass::layout::RowMajor;                      // Layout type for A matrix operand
-constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementA>::value;    // Alignment of A matrix in units of elements (up to 16 bytes)
-
-// B matrix configuration
-using         LayoutB     = cutlass::layout::ColumnMajor;                   // Layout type for B matrix operand
-constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // Alignment of B matrix in units of elements (up to 16 bytes)
-
-// C/D matrix configuration
-using         LayoutC     = cutlass::layout::ColumnMajor;                   // Layout type for C and D matrix operands
-constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // Alignment of C matrix in units of elements (up to 16 bytes)
-
-// Core kernel configurations
-using ElementAccumulator  = float;                                          // Element type for internal accumulation
-using ArchTag             = cutlass::arch::Sm90;                            // Tag indicating the minimum SM that supports the intended feature
-using OperatorClass       = cutlass::arch::OpClassTensorOp;                 // Operator class tag
-using StageCountType = cutlass::gemm::collective::StageCountAuto;           // Stage count maximized based on the tile size
-
-// Different configs for pingpong/cooperative
-struct CooperativeConfig {
-    using KernelSchedule   = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
-    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
-    using TileShape        = Shape<_256, _128, _128>;
-    using ClusterShape     = Shape<_1, _2, _1>;
-};
-
-struct PingpongConfig {
-    using KernelSchedule   = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
-    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-    using TileShape        = Shape<_128, _128, _128>;
-    using ClusterShape     = Shape<_2, _1, _1>;
-};
-
-template <typename ScheduleConfig>
-struct GemmGivenSchedule {
-  using TileShape           = typename ScheduleConfig::TileShape;                   // Threadblock-level tile size
-  using ClusterShape        = typename ScheduleConfig::ClusterShape;                // Shape of the threadblocks in a cluster
-  using KernelSchedule      = typename ScheduleConfig::KernelSchedule;              // Kernel to launch
-  using EpilogueSchedule    = typename ScheduleConfig::EpilogueSchedule;            // Epilogue to launch
-
-  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    TileShape, ClusterShape,
-    cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAccumulator, ElementAccumulator,
-    ElementC, LayoutC *, AlignmentC,
-    ElementC, LayoutC *, AlignmentC,
-    EpilogueSchedule,
-    cutlass::epilogue::fusion::LinearCombination<ElementC, ElementAccumulator>
-  >::CollectiveOp;
-
-using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-    ArchTag, OperatorClass,
-    ElementA, LayoutA *, AlignmentA,
-    ElementB, LayoutB *, AlignmentB,
-    ElementAccumulator,
-    TileShape, ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-      static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    KernelSchedule
-  >::CollectiveOp;
-
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      ProblemShape,
-      CollectiveMainloop,
-      CollectiveEpilogue
-  >;
-
-  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-};
-
-using GemmKernel = GemmGivenSchedule<CooperativeConfig>::GemmKernel;
-using Gemm = GemmGivenSchedule<CooperativeConfig>::Gemm;
-
-using GemmKernelPingpong = GemmGivenSchedule<PingpongConfig>::GemmKernel;
-using GemmPingpong = GemmGivenSchedule<PingpongConfig>::Gemm;
 
 // Reference device GEMM implementation type
 using DeviceGemmReference = cutlass::reference::device::Gemm<
@@ -727,71 +637,6 @@ int run(Options &options, bool host_problem_shapes_available = true)
 
 #endif // defined(CUTLASS_ARCH_MMA_MODIFIABLE_TMA_SM90_SUPPORTED)
 
-int run_cublas(const Options& options, Result& result, cudaStream_t* streams, int num_streams)
-{
-    cublasHandle_t handles[num_streams];
-    for (int i = 0; i < num_streams; ++i)
-    {
-        cublasCreate(&handles[i]);
-        cublasSetStream(handles[i], streams[i]);
-    }
-
-    // Launch all GEMMs
-    for (int i = 0; i < options.groups; ++i)
-    {
-        int m = get<0>(options.problem_sizes_host[i]);
-        int n = get<1>(options.problem_sizes_host[i]);
-        int k = get<2>(options.problem_sizes_host[i]);
-
-        auto A_ptr = block_A.get() + offset_A[i];
-        auto B_ptr = block_B.get() + offset_B[i];
-        auto C_ptr = block_C.get() + offset_C[i];   // bias or pre-existing C
-        auto D_ptr = block_D.get() + offset_D[i];   // output
-
-        float alpha = alpha_host[i];
-        float beta  = beta_host[i];
-
-        auto opA = CUBLAS_OP_N;   // LayoutA is RowMajor
-        auto opB = CUBLAS_OP_T;   // LayoutB is ColMajor (opB = T gives ColMajor effective layout)
-        int  lda = k;
-        int  ldb = k;
-        int  ldc = m;
-        int  ldd = m;
-
-        cublasHandle_t handle = handles[i % num_streams];
-        cublasGemmEx(handle,
-                     opB,
-                     opA,   // NOTE: row-major => op(B), op(A)
-                     n,
-                     m,
-                     k,   // C = A * B → [m,n] = [m,k] * [k,n]
-                     &alpha,
-                     B_ptr,
-                     CUDA_R_16F,
-                     ldb,
-                     A_ptr,
-                     CUDA_R_16F,
-                     lda,
-                     &beta,
-                     D_ptr,
-                     CUDA_R_16F,
-                     ldd,
-                     CUDA_R_32F,
-                     CUBLAS_GEMM_DEFAULT);
-    }
-
-    // Sync all streams
-    for (int i = 0; i < num_streams; ++i)
-    {
-        cudaStreamSynchronize(streams[i]);
-    }
-
-    // Compare accuracy
-    result.passed = verify(options);
-    return 0;
-}
-
-
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char const **args) {
@@ -829,34 +674,6 @@ int main(int argc, char const **args) {
     options.print_usage(std::cout) << std::endl;
     return 0;
   }
-
-  //
-  // Evaluate CUTLASS kernels
-  //
-
-  Result       cublas_result;
-  cudaStream_t streams[4];   // 举例：4 个 CUDA stream
-  for (int i = 0; i < 4; ++i)
-  {
-      cudaStreamCreate(&streams[i]);
-  }
-  run_cublas(options, cublas_result, streams, 4);
-  std::cout << "cuBLAS Verification: " << (cublas_result.passed ? "Passed" : "Failed") << std::endl;
-
-  GpuTimer timer;
-  timer.start();
-  for (int iter = 0; iter < options.iterations; ++iter)
-  {
-      run_cublas(options, cublas_result, streams, 4);
-  }
-  timer.stop();
-  float elapsed_ms             = timer.elapsed_millis();
-  cublas_result.avg_runtime_ms = elapsed_ms / options.iterations;
-  cublas_result.gflops         = options.gflops(cublas_result.avg_runtime_ms / 1000.0,
-                                        options.problem_sizes_host);
-
-  std::cout << "cuBLAS runtime  : " << cublas_result.avg_runtime_ms << " ms" << std::endl;
-  std::cout << "cuBLAS TFLOPS   : " << cublas_result.gflops / 1000.0 << std::endl;
 
   //
   // Evaluate CUTLASS kernels
