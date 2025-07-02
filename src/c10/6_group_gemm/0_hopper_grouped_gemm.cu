@@ -834,29 +834,30 @@ int main(int argc, char const **args) {
   // Evaluate CUTLASS kernels
   //
 
-  Result       cublas_result;
-  cudaStream_t streams[4];   // 举例：4 个 CUDA stream
-  for (int i = 0; i < 4; ++i)
-  {
-      cudaStreamCreate(&streams[i]);
-  }
-  run_cublas(options, cublas_result, streams, 4);
-  std::cout << "cuBLAS Verification: " << (cublas_result.passed ? "Passed" : "Failed") << std::endl;
+  // Result       cublas_result;
+  // cudaStream_t streams[4];   // 举例：4 个 CUDA stream
+  // for (int i = 0; i < 4; ++i)
+  // {
+  //     cudaStreamCreate(&streams[i]);
+  // }
+  // run_cublas(options, cublas_result, streams, 4);
+  // std::cout << "cuBLAS Verification: " << (cublas_result.passed ? "Passed" : "Failed") <<
+  // std::endl;
 
-  GpuTimer timer;
-  timer.start();
-  for (int iter = 0; iter < options.iterations; ++iter)
-  {
-      run_cublas(options, cublas_result, streams, 4);
-  }
-  timer.stop();
-  float elapsed_ms             = timer.elapsed_millis();
-  cublas_result.avg_runtime_ms = elapsed_ms / options.iterations;
-  cublas_result.gflops         = options.gflops(cublas_result.avg_runtime_ms / 1000.0,
-                                        options.problem_sizes_host);
+  // GpuTimer timer;
+  // timer.start();
+  // for (int iter = 0; iter < options.iterations; ++iter)
+  // {
+  //     run_cublas(options, cublas_result, streams, 4);
+  // }
+  // timer.stop();
+  // float elapsed_ms             = timer.elapsed_millis();
+  // cublas_result.avg_runtime_ms = elapsed_ms / options.iterations;
+  // cublas_result.gflops         = options.gflops(cublas_result.avg_runtime_ms / 1000.0,
+  //                                       options.problem_sizes_host);
 
-  std::cout << "cuBLAS runtime  : " << cublas_result.avg_runtime_ms << " ms" << std::endl;
-  std::cout << "cuBLAS TFLOPS   : " << cublas_result.gflops / 1000.0 << std::endl;
+  // std::cout << "cuBLAS runtime  : " << cublas_result.avg_runtime_ms << " ms" << std::endl;
+  // std::cout << "cuBLAS TFLOPS   : " << cublas_result.gflops / 1000.0 << std::endl;
 
   //
   // Evaluate CUTLASS kernels
